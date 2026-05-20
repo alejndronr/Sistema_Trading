@@ -1,0 +1,42 @@
+# ── Core Exchange & Data ───────────────────────────────────────────────────────
+ccxt>=4.3.0                  # Exchange API (Binance REST + WebSocket)
+pandas>=2.2.0                # DataFrame operations
+numpy>=1.26.0                # Numerical computing
+
+# ── Technical Indicators ───────────────────────────────────────────────────────
+pandas-ta>=0.3.14b           # 130+ indicators (RSI, MACD, BB, etc.)
+ta>=0.11.0                   # Alternative TA library (fallback)
+
+# ── Database ───────────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0            # ORM / query builder (SQLite + PG compatible)
+psycopg2-binary>=2.9.9       # PostgreSQL adapter (Phase 2+)
+
+# ── Machine Learning (Phase 2) ─────────────────────────────────────────────────
+scikit-learn>=1.4.0          # RandomForest, metrics, preprocessing, joblib
+joblib>=1.3.0                # Model serialization (included with sklearn)
+
+# ── Async & Networking ─────────────────────────────────────────────────────────
+aiohttp>=3.9.0               # Async HTTP client
+websockets>=12.0             # WebSocket client for live data
+
+# ── Configuration & Environment ────────────────────────────────────────────────
+python-dotenv>=1.0.0         # Load .env files
+pydantic>=2.6.0              # Config validation with type safety
+pydantic-settings>=2.2.0     # Settings management
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+structlog>=24.1.0            # Structured logging
+rich>=13.7.0                 # Beautiful terminal output
+
+# ── Reporting & Visualization ──────────────────────────────────────────────────
+plotly>=5.20.0               # Interactive charts for backtesting report
+jinja2>=3.1.0                # HTML report templating
+kaleido>=0.2.1               # Static image export for plots
+
+# ── Scheduling ─────────────────────────────────────────────────────────────────
+apscheduler>=3.10.0          # Job scheduler for live trading (Phase 2+)
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+python-dateutil>=2.9.0       # Date parsing utilities
+pytz>=2024.1                 # Timezone handling
+tqdm>=4.66.0                 # Progress bars for data downloads

@@ -1,0 +1,30 @@
+﻿# Secretos — NUNCA subir
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Base de datos local
+*.db
+*.sqlite3
+
+# Modelos ML entrenados
+ml/model.joblib
+ml/model_metadata.json
+
+# Reportes generados
+reports/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
