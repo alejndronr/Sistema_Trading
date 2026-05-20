@@ -1,0 +1,29 @@
+# /etc/systemd/system/trading-retrain.timer
+# ══════════════════════════════════════════════════════════════════════════════
+# Timer mensual: dispara trading-retrain.service el día 1 de cada mes
+# a las 02:00 AM UTC.
+#
+# RandomizedDelaySec=300 añade un jitter de ±5 min para no saturar
+# el servidor exactamente a las 02:00 junto con otros timers.
+#
+# Persistent=true garantiza que si el servidor estuvo apagado en ese
+# momento, el retrain se ejecutará la próxima vez que arranque.
+#
+# Instalación:
+#   sudo systemctl enable --now trading-retrain.timer
+# Verificar:
+#   systemctl list-timers | grep retrain
+# ══════════════════════════════════════════════════════════════════════════════
+
+[Unit]
+Description=Monthly ML Model Retraining Timer — Trading System
+
+[Timer]
+# Día 1 de cada mes a las 02:00:00 UTC
+OnCalendar=*-*-01 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=trading-retrain.service
+
+[Install]
+WantedBy=timers.target

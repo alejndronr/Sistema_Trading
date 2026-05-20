@@ -1,411 +1,436 @@
-"""monitoring/telegram_bot.py — Bot de control institucional para Paper‑Trading.
-
-Funcionalidades:
-    Alertas pasivas (llamadas directas, sin polling):
-        • alert_trade_executed()    — trade abierto por el motor
-        • alert_signal_rejected()   — señal rechazada por el filtro ML
-        • alert_daily_summary()     — resumen nocturno de PnL y drawdown
-
-    Comandos activos (polling en background):
-        /status   — capital, posiciones abiertas, PnL del día, drawdown, modelo ML
-        /pause    — pausa nuevas entradas sin cerrar posiciones existentes
-        /resume   — reanuda la operativa normal
-        /kill     — solicita confirmación y apaga el motor elegantemente
+"""
+monitoring/telegram_bot.py — Bot de Telegram de control institucional.
+=======================================================================
+Se integra en live_engine.py, NO es un proceso separado.
+Envía alertas pasivas (trades, señales, PnL) y procesa comandos activos
+del operador (/status, /pause, /resume, /kill).
 
 Seguridad:
-    • Solo responde a TELEGRAM_ALLOWED_USER_ID (variable de entorno)
-    • Ante cualquier remitente no autorizado, respuesta genérica sin info
-
-Dependencias:
-    pip install python-telegram-bot>=20.7
-
-Uso:
-    Ejecutar `start_command_listener(engine_ref, portfolio_ref)` como
-    tarea asyncio ANTES de llamar a `live_engine.run()`.
-
-    from monitoring.telegram_bot import start_command_listener
-    asyncio.create_task(start_command_listener(engine, portfolio))
+    - Solo responde al TELEGRAM_ALLOWED_USER_ID configurado en .env.
+    - Los mensajes de IDs no autorizados se descartan en silencio (sin log).
+    - El kill switch requiere dos mensajes: /kill + CONFIRMAR (máx. 60s).
+    - Si el token es inválido, el sistema opera sin bot (no es fallo crítico).
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-from datetime import datetime
-from typing import Any, Mapping, Optional
+import time
+from typing import Any, Dict, List, Optional
 
-import requests
+import aiohttp
+import structlog
 
-from config.settings import env_settings, ML_CONFIG
+log = structlog.get_logger(__name__)
 
-log = logging.getLogger(__name__)
-
-# ── Constantes de seguridad ────────────────────────────────────────────────────
-# Se carga desde .env; si no existe, el bot acepta todos los usuarios (peligroso)
-_ALLOWED_USER_ID: Optional[int] = (
-    int(os.environ.get("TELEGRAM_ALLOWED_USER_ID", 0)) or None
-)
-
-# Estado compartido de pausa (consultado por live_engine.signal_worker)
-_PAUSED: bool = False
-# Referencia al kill‑switch del motor (se inyecta al iniciar el listener)
-_kill_switch_ref: Any = None
-# Referencia a la cartera virtual (para /status y /kill)
-_portfolio_ref: Any = None
-# Token de confirmación de kill en curso (evita kills accidentales)
-_pending_kill: bool = False
+ML_THRESHOLD = 0.60   # Umbral por defecto; live_engine puede pasar el suyo
 
 
-def is_paused() -> bool:
-    """Devuelve True si el motor está en pausa (sin nuevas entradas)."""
-    return _PAUSED
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Low‑level HTTP helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _token() -> str:
-    return env_settings.telegram_bot_token
-
-def _chat_id() -> str:
-    return env_settings.telegram_chat_id
-
-
-def _post(method: str, payload: Mapping[str, Any]) -> Optional[dict]:
-    """POST a la Telegram Bot API. Devuelve el JSON de respuesta o None."""
-    if not _token() or not _chat_id():
-        log.warning("Telegram credentials no configuradas — omitiendo notificación.")
-        return None
-    url = f"https://api.telegram.org/bot{_token()}/{method}"
-    data = {"chat_id": _chat_id(), **payload}
-    try:
-        resp = requests.post(url, json=data, timeout=5)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        log.error("Telegram POST falló (%s): %s", method, exc)
-        return None
-
-
-def _reply(chat_id: int | str, text: str, parse_mode: str = "Markdown") -> None:
-    """Responde a un chat específico (puede ser diferente al canal de alertas)."""
-    if not _token():
-        return
-    url = f"https://api.telegram.org/bot{_token()}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=5)
-    except Exception as exc:
-        log.error("_reply falló: %s", exc)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Alertas pasivas (llamadas directas desde el motor)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def alert_trade_executed(
-    symbol: str,
-    direction: str,
-    entry_price: float,
-    stop_loss: float,
-    take_profit_1: float,
-    ml_probability: float,
-) -> None:
-    """Alerta cuando un trade pasa el filtro ML y se abre la posición virtual."""
-    rr = round(abs(take_profit_1 - entry_price) / abs(entry_price - stop_loss), 2)
-    emoji = "🟢" if direction.upper() == "LONG" else "🔴"
-    txt = (
-        f"{emoji} *Trade ejecutado*\n"
-        f"*Par*: `{symbol}`\n"
-        f"*Dirección*: `{direction}`\n"
-        f"*Entrada*: `{entry_price:.2f}`\n"
-        f"*Stop‑Loss*: `{stop_loss:.2f}`\n"
-        f"*Take‑Profit*: `{take_profit_1:.2f}` (R/R `{rr}x`)\n"
-        f"*Confianza ML*: `{ml_probability:.1%}` ✅"
-    )
-    _post("sendMessage", {"text": txt, "parse_mode": "Markdown"})
-
-
-def alert_signal_rejected(
-    symbol: str,
-    ml_probability: float,
-    threshold: float | None = None,
-) -> None:
-    """Alerta silenciosa cuando una señal es rechazada por el filtro ML."""
-    thr = threshold if threshold is not None else ML_CONFIG.confidence_threshold
-    txt = (
-        f"⚠️ *Señal rechazada*\n"
-        f"`{symbol}` — Prob ML: `{ml_probability:.1%}` (umbral: `{thr:.0%}`)"
-    )
-    _post("sendMessage", {"text": txt, "parse_mode": "Markdown"})
-
-
-def alert_trade_closed(
-    symbol: str,
-    direction: str,
-    entry_price: float,
-    exit_price: float,
-    pnl_usd: float,
-    exit_reason: str,
-) -> None:
-    """Alerta cuando el motor cierra una posición (SL o TP)."""
-    emoji = "✅" if pnl_usd >= 0 else "🛑"
-    txt = (
-        f"{emoji} *Posición cerrada*\n"
-        f"*Par*: `{symbol}` | *Dir*: `{direction}`\n"
-        f"*Entrada*: `{entry_price:.2f}` → *Salida*: `{exit_price:.2f}`\n"
-        f"*PnL*: `{pnl_usd:+.2f}` USD\n"
-        f"*Razón*: `{exit_reason}`"
-    )
-    _post("sendMessage", {"text": txt, "parse_mode": "Markdown"})
-
-
-def alert_daily_summary(
-    date: datetime,
-    pnl_usd: float,
-    drawdown_pct: float,
-    open_trades: int,
-) -> None:
-    """Resumen nocturno enviado al cierre de cada sesión."""
-    trend = "📈" if pnl_usd >= 0 else "📉"
-    txt = (
-        f"*📊 Resumen diario — {date:%Y‑%m‑%d}*\n"
-        f"{trend} *PnL del día*: `{pnl_usd:+.2f}` USD\n"
-        f"*Drawdown actual*: `{drawdown_pct:.2%}`\n"
-        f"*Posiciones abiertas*: `{open_trades}`"
-    )
-    _post("sendMessage", {"text": txt, "parse_mode": "Markdown"})
-
-
-def alert_engine_stopped(reason: str = "kill switch") -> None:
-    """Notifica que el motor se ha detenido."""
-    _post("sendMessage", {
-        "text": f"⛔️ *Motor detenido*\nRazón: `{reason}`",
-        "parse_mode": "Markdown",
-    })
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Polling loop — escucha comandos activos del operador
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def start_command_listener(kill_switch, portfolio) -> None:
+class TelegramBot:
     """
-    Corrutina asyncio que hace long‑polling a la Bot API y despacha
-    los comandos /status, /pause, /resume y /kill.
+    Cliente HTTP asíncrono para la Telegram Bot API.
 
-    Args:
-        kill_switch: instancia de ``execution.failsafes.KillSwitch``
-        portfolio:   instancia de ``execution.paper_portfolio.PaperPortfolio``
+    Envía mensajes y hace long-polling para recibir comandos.
+    No bloquea el event loop: todos los métodos son async.
     """
-    global _kill_switch_ref, _portfolio_ref, _PAUSED, _pending_kill
-    _kill_switch_ref = kill_switch
-    _portfolio_ref   = portfolio
 
-    offset: int = 0
-    log.info("Telegram command listener iniciado.")
+    # Prefijo de la API
+    _BASE = "https://api.telegram.org/bot{token}/{method}"
 
-    while not kill_switch.is_active():
-        updates = await _get_updates(offset)
+    def __init__(self, token: str, allowed_chat_id: int) -> None:
+        """
+        Args:
+            token:          token del bot obtenido de @BotFather.
+            allowed_chat_id: único ID autorizado para enviar comandos.
+        """
+        self._token = token
+        self._allowed_chat_id = allowed_chat_id
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._offset: int = 0
+        self._kill_pending: bool = False
+        self._kill_timestamp: float = 0.0
+        self._ready: bool = False
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        """
+        Inicializa la sesión HTTP y verifica el token con getMe.
+        Si el token es inválido, loguea error pero NO lanza excepción
+        (el motor debe operar aunque el bot falle).
+        """
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+        try:
+            data = await self._call("getMe", {})
+            if data and data.get("ok"):
+                bot_name = data["result"].get("username", "?")
+                log.info("telegram_bot_ready", bot_username=bot_name)
+                self._ready = True
+            else:
+                log.error("telegram_invalid_token", response=data)
+        except Exception as exc:
+            log.error("telegram_start_failed", error=str(exc))
+            # No relanzar: el motor sigue sin bot
+
+    async def stop(self) -> None:
+        """Cierra la sesión HTTP."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._ready = False
+
+    # ── Envío de mensajes ─────────────────────────────────────────────────────
+
+    async def send_trade_open(self, trade: Dict[str, Any]) -> None:
+        """
+        Alerta cuando se abre una posición virtual o real.
+
+        Args:
+            trade: dict con symbol, entry_price, stop_loss, tp1, tp2,
+                   units, risk_amount, strategy, ml_proba.
+        """
+        symbol = trade.get("symbol", "—")
+        entry  = trade.get("entry_price", 0)
+        sl     = trade.get("stop_loss", 0)
+        tp1    = trade.get("tp1", 0)
+        tp2    = trade.get("tp2", 0)
+        risk   = trade.get("risk_amount", 0)
+        ml     = trade.get("ml_proba", 0)
+        strat  = trade.get("strategy", "—")
+
+        msg = (
+            f"🟢 *TRADE ABIERTO*\n"
+            f"Par: `{symbol}` | Estrategia: `{strat}`\n"
+            f"Entrada: `${entry:.2f}`\n"
+            f"SL: `${sl:.2f}` | TP1: `${tp1:.2f}` | TP2: `${tp2:.2f}`\n"
+            f"Riesgo: `${risk:.2f}` (1%)\n"
+            f"Confianza ML: `{ml:.1%}` ✅"
+        )
+        await self._send(msg)
+
+    async def send_trade_close(self, trade: Dict[str, Any], reason: str) -> None:
+        """
+        Alerta cuando se cierra una posición.
+
+        Args:
+            trade:  dict con pnl, pnl_pct, r_multiple, symbol, strategy.
+            reason: razón de cierre (stop_loss, tp1, tp2, breakeven, kill).
+        """
+        pnl     = trade.get("pnl", 0)
+        pnl_pct = trade.get("pnl_pct", 0)
+        r_mult  = trade.get("r_multiple", 0)
+        symbol  = trade.get("symbol", "—")
+
+        if pnl > 0:
+            emoji = "🟢"
+            outcome = "PROFIT"
+        elif abs(pnl) < 0.01:
+            emoji = "🟡"
+            outcome = "BREAKEVEN"
+        else:
+            emoji = "🔴"
+            outcome = "LOSS"
+
+        msg = (
+            f"{emoji} *TRADE CERRADO — {outcome}*\n"
+            f"Par: `{symbol}` | Razón: `{reason}`\n"
+            f"PnL: `{pnl:+.2f}` USD (`{pnl_pct:+.2%}`)\n"
+            f"R-Múltiple: `{r_mult:+.2f}R`"
+        )
+        await self._send(msg)
+
+    async def send_signal_filtered(
+        self,
+        symbol: str,
+        strategy: str,
+        ml_proba: float,
+        threshold: float = ML_THRESHOLD,
+    ) -> None:
+        """
+        Alerta silenciosa cuando una señal es rechazada por el filtro ML.
+        """
+        msg = (
+            f"⚪ *SEÑAL SILENCIADA*\n"
+            f"`{symbol}` [`{strategy}`]\n"
+            f"ML probabilidad: `{ml_proba:.1%}` (umbral `{threshold:.0%}`)"
+        )
+        await self._send(msg)
+
+    async def send_daily_pnl(self, stats: Dict[str, Any]) -> None:
+        """
+        Resumen nocturno de PnL y estado del sistema.
+
+        Args:
+            stats: dict con capital, pnl_today, trades_today, wins_today,
+                   losses_today, drawdown_pct, ml_ready, ml_trained_at.
+        """
+        capital   = stats.get("capital", 0)
+        pnl       = stats.get("pnl_today", 0)
+        trades    = stats.get("trades_today", 0)
+        wins      = stats.get("wins_today", 0)
+        losses    = stats.get("losses_today", 0)
+        dd        = stats.get("drawdown_pct", 0)
+        ml_ready  = "✅" if stats.get("ml_ready") else "⚠️ Sin entrenar"
+        ml_date   = stats.get("ml_trained_at", "—")
+
+        trend = "📈" if pnl >= 0 else "📉"
+        msg = (
+            f"*📊 Resumen diario*\n"
+            f"{trend} PnL: `{pnl:+.2f}` USD\n"
+            f"Capital: `${capital:.2f}`\n"
+            f"Trades: `{trades}` (W:{wins} / L:{losses})\n"
+            f"Drawdown: `{dd:.2%}`\n"
+            f"Modelo ML: {ml_ready} | Entrenado: `{ml_date}`"
+        )
+        await self._send(msg)
+
+    async def send_alert(self, message: str, level: str = "info") -> None:
+        """
+        Envía una alerta genérica.
+
+        Args:
+            message: texto libre.
+            level:   "info" | "warning" | "critical".
+        """
+        prefix = {
+            "info":     "ℹ️",
+            "warning":  "⚠️",
+            "critical": "🚨",
+        }.get(level, "ℹ️")
+
+        msg = f"{prefix} {message}"
+        await self._send(msg, pin=(level == "critical"))
+
+    async def send_heartbeat_fail(self) -> None:
+        """Alerta de heartbeat perdido."""
+        await self._send(
+            "🚨 *HEARTBEAT PERDIDO*\nEl engine no respondió en los últimos 60s.\n"
+            "Verificar: `journalctl -fu trading-engine`",
+            pin=True,
+        )
+
+    async def send_startup(self, paper_mode: bool, capital: float, n_positions: int) -> None:
+        """Alerta de arranque del motor."""
+        mode_label = "📄 PAPER" if paper_mode else "🔴 LIVE"
+        msg = (
+            f"🚀 *Engine arrancado* | {mode_label}\n"
+            f"Capital: `${capital:.2f}`\n"
+            f"Posiciones recuperadas: `{n_positions}`"
+        )
+        await self._send(msg)
+
+    async def send_shutdown(self, reason: str, session_pnl: float) -> None:
+        """Alerta de parada del motor."""
+        msg = (
+            f"⛔ *Engine detenido*\n"
+            f"Razón: `{reason}`\n"
+            f"PnL de sesión: `{session_pnl:+.2f}` USD"
+        )
+        await self._send(msg)
+
+    # ── Procesamiento de comandos (polling) ───────────────────────────────────
+
+    async def process_updates(self, engine_state: Dict[str, Any]) -> Optional[str]:
+        """
+        Hace long-polling de updates de Telegram (timeout=5s, no bloquea).
+        Procesa los comandos del operador autorizado y muta engine_state.
+
+        Args:
+            engine_state: dict compartido con el motor. Claves relevantes:
+                          "paused" (bool), "kill" (bool), "capital" (float),
+                          "open_positions" (list), "pnl_today" (float),
+                          "drawdown_pct" (float), "ml_ready" (bool).
+
+        Returns:
+            El comando procesado como string, o None si no hubo nada.
+        """
+        if not self._ready or not self._session:
+            return None
+
+        updates = await self._get_updates(timeout=5)
+        processed_cmd: Optional[str] = None
+
         for update in updates:
-            offset = update["update_id"] + 1
-            await _dispatch(update)
-        await asyncio.sleep(2)   # polling cada 2 segundos
+            self._offset = update["update_id"] + 1
+            message = update.get("message", {})
+            if not message:
+                continue
 
+            from_id = message.get("from", {}).get("id")
+            chat_id = message.get("chat", {}).get("id")
+            text    = (message.get("text") or "").strip()
 
-async def _get_updates(offset: int) -> list:
-    """Llama a getUpdates con long‑polling de 30 segundos."""
-    if not _token():
-        await asyncio.sleep(10)
-        return []
-    url = f"https://api.telegram.org/bot{_token()}/getUpdates"
-    params = {"timeout": 30, "offset": offset, "allowed_updates": ["message"]}
-    try:
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(
-            None,
-            lambda: requests.get(url, params=params, timeout=35),
-        )
-        data = resp.json()
-        return data.get("result", []) if data.get("ok") else []
-    except Exception as exc:
-        log.debug("getUpdates error: %s", exc)
-        return []
+            # ── Verificación de autorización ──────────────────────────────────
+            if from_id != self._allowed_chat_id:
+                # Silencio total ante usuarios no autorizados
+                continue
 
+            log.info("telegram_command_received", text=text[:60])
 
-async def _dispatch(update: dict) -> None:
-    """Identifica el comando y lo despacha al handler correspondiente."""
-    global _pending_kill
+            # ── Kill switch en dos pasos ───────────────────────────────────────
+            if self._kill_pending:
+                if time.time() - self._kill_timestamp > 60:
+                    self._kill_pending = False
+                    await self._reply(chat_id, "⏱ Confirmación expirada. /kill cancelado.")
+                    continue
 
-    message = update.get("message", {})
-    if not message:
-        return
-
-    from_user = message.get("from", {})
-    user_id   = from_user.get("id")
-    chat_id   = message.get("chat", {}).get("id")
-    text      = (message.get("text") or "").strip()
-
-    # ── Verificación de seguridad ──────────────────────────────────────────
-    if _ALLOWED_USER_ID and user_id != _ALLOWED_USER_ID:
-        _reply(chat_id, "ℹ️ Sistema de trading — canal privado.")
-        log.warning("Comando recibido de user_id no autorizado: %d", user_id)
-        return
-
-    log.info("Comando recibido de uid=%d: %s", user_id, text[:80])
-
-    # ── CONFIRMAR kill pendiente ───────────────────────────────────────────
-    if _pending_kill:
-        if text.upper() == "CONFIRMAR":
-            _pending_kill = False
-            await _handle_kill_confirmed(chat_id)
-        else:
-            _pending_kill = False
-            _reply(chat_id, "✅ Kill cancelado. El motor sigue activo.")
-        return
-
-    # ── Despachar comando ──────────────────────────────────────────────────
-    cmd = text.split()[0].lower() if text else ""
-
-    if cmd == "/status":
-        await _cmd_status(chat_id)
-    elif cmd == "/pause":
-        await _cmd_pause(chat_id)
-    elif cmd == "/resume":
-        await _cmd_resume(chat_id)
-    elif cmd == "/kill":
-        await _cmd_kill_request(chat_id)
-    elif cmd.startswith("/"):
-        _reply(chat_id, "ℹ️ Comando no reconocido. Comandos disponibles: /status /pause /resume /kill")
-    # Mensajes sin "/" se ignoran en silencio
-
-
-# ── Handlers de cada comando ─────────────────────────────────────────────────
-
-async def _cmd_status(chat_id: int) -> None:
-    """Muestra el estado completo del sistema."""
-    from pathlib import Path
-    from config.settings import ML_CONFIG
-
-    portfolio = _portfolio_ref
-    open_trades = portfolio.get_open_trades() if portfolio else []
-    capital     = portfolio.capital if portfolio else 0.0
-
-    # Comprobar si existe el modelo ML entrenado
-    model_path = ML_CONFIG.model_dir / ML_CONFIG.model_filename
-    model_ok   = "✅ Cargado" if model_path.exists() else "❌ No encontrado"
-    mtime      = (
-        datetime.fromtimestamp(model_path.stat().st_mtime).strftime("%Y-%m-%d")
-        if model_path.exists() else "—"
-    )
-
-    engine_state = "⏸ PAUSADO" if _PAUSED else "▶️ ACTIVO"
-
-    trades_txt = ""
-    for t in open_trades:
-        trades_txt += (
-            f"  • `{t['symbol']}` {t['direction']} @ `{t['entry_price']:.2f}`"
-            f"  SL `{t['stop_loss']:.2f}`  TP `{t['take_profit_1']:.2f}`\n"
-        )
-    trades_txt = trades_txt or "  _Ninguna_"
-
-    txt = (
-        f"*📡 Estado del sistema — {datetime.utcnow():%Y‑%m‑%d %H:%M} UTC*\n\n"
-        f"*Capital*: `${capital:.2f}`\n"
-        f"*Motor*: {engine_state}\n"
-        f"*Modelo ML*: {model_ok} (actualizado: {mtime})\n"
-        f"*Umbral ML*: `{ML_CONFIG.confidence_threshold:.0%}`\n\n"
-        f"*Posiciones abiertas* ({len(open_trades)}):\n{trades_txt}"
-    )
-    _reply(chat_id, txt)
-
-
-async def _cmd_pause(chat_id: int) -> None:
-    """Pausa nuevas entradas sin cerrar posiciones existentes."""
-    global _PAUSED
-    if _PAUSED:
-        _reply(chat_id, "ℹ️ El motor ya está en pausa. Usa /resume para reanudar.")
-        return
-    _PAUSED = True
-    log.warning("Motor PAUSADO por comando Telegram (uid relacionado).")
-    _reply(chat_id,
-        "⏸ *Motor pausado*\n"
-        "No se abrirán nuevas posiciones.\n"
-        "Las posiciones existentes siguen monitorizadas.\n"
-        "Usa /resume para reanudar."
-    )
-
-
-async def _cmd_resume(chat_id: int) -> None:
-    """Reanuda la operativa normal."""
-    global _PAUSED
-    if not _PAUSED:
-        _reply(chat_id, "ℹ️ El motor ya está activo. No hay nada que reanudar.")
-        return
-    _PAUSED = False
-    log.info("Motor REANUDADO por comando Telegram.")
-    _reply(chat_id, "▶️ *Motor reanudado* — volviendo a la operativa normal.")
-
-
-async def _cmd_kill_request(chat_id: int) -> None:
-    """Solicita confirmación antes de ejecutar el kill switch."""
-    global _pending_kill
-    _pending_kill = True
-    _reply(
-        chat_id,
-        "⛔️ *KILL SWITCH*\n\n"
-        "Esta acción:\n"
-        "1. Cierra todas las posiciones a precio de mercado\n"
-        "2. Detiene el motor de trading\n"
-        "3. Guarda el estado en la base de datos\n\n"
-        "*¿Estás seguro?* Responde exactamente: `CONFIRMAR`\n"
-        "_(Cualquier otra respuesta cancela el kill)_"
-    )
-
-
-async def _handle_kill_confirmed(chat_id: int) -> None:
-    """Ejecuta el kill switch: cierra posiciones y para el motor."""
-    global _kill_switch_ref, _portfolio_ref
-
-    _reply(chat_id, "⛔️ Ejecutando kill switch — cerrando posiciones...")
-    log.critical("KILL SWITCH activado por comando Telegram.")
-
-    # 1️⃣ Obtener precio actual para cerrar posiciones a mercado
-    portfolio = _portfolio_ref
-    if portfolio:
-        open_trades = portfolio.get_open_trades()
-        if open_trades:
-            # Intentamos obtener el precio actual vía ccxt
-            try:
-                import ccxt
-                exchange = ccxt.binance({"enableRateLimit": True})
-                for trade in list(open_trades):
-                    symbol = trade["symbol"]
-                    ticker = exchange.fetch_ticker(symbol)
-                    price  = float(ticker["last"])
-                    portfolio.close_trade(
-                        trade_id=trade["trade_id"],
-                        exit_price=price,
-                        exit_reason="kill_switch",
+                if text.upper() == "CONFIRMAR":
+                    self._kill_pending = False
+                    engine_state["kill"] = True
+                    await self._reply(
+                        chat_id,
+                        "⛔ *KILL SWITCH activado.*\n"
+                        "Cerrando posiciones y apagando el motor..."
                     )
-                    log.info("Posición %s cerrada a %.2f por kill switch.", symbol, price)
-                exchange.close()
-            except Exception as exc:
-                log.error("Error cerrando posiciones en kill switch: %s", exc)
-                _reply(chat_id, f"⚠️ Error cerrando posiciones: `{exc}`")
-        else:
-            log.info("Kill switch: no había posiciones abiertas.")
+                    processed_cmd = "kill"
+                else:
+                    self._kill_pending = False
+                    await self._reply(chat_id, "✅ Kill cancelado. El motor sigue activo.")
+                continue
 
-    # 2️⃣ Activar el kill switch del motor
-    if _kill_switch_ref:
-        _kill_switch_ref.activate()
+            # ── Comandos estándar ─────────────────────────────────────────────
+            cmd = text.split()[0].lower() if text else ""
 
-    _reply(
-        chat_id,
-        "✅ *Kill switch ejecutado*\n"
-        "Todas las posiciones cerradas. Motor detenido.\n"
-        "El servicio se reiniciará en 30s (RestartSec en systemd).\n"
-        "Para evitar el reinicio: `sudo systemctl stop trading-engine`"
-    )
-    alert_engine_stopped("kill switch via Telegram")
+            if cmd == "/status":
+                await self._cmd_status(chat_id, engine_state)
+                processed_cmd = "status"
+
+            elif cmd == "/pause":
+                engine_state["paused"] = True
+                await self._reply(
+                    chat_id,
+                    "⏸ *Motor pausado.*\n"
+                    "No se abrirán nuevas posiciones.\n"
+                    "SL/TP siguen monitorizados.\n"
+                    "Usa /resume para reanudar."
+                )
+                log.warning("engine_paused_by_telegram")
+                processed_cmd = "pause"
+
+            elif cmd == "/resume":
+                if engine_state.get("paused"):
+                    engine_state["paused"] = False
+                    await self._reply(chat_id, "▶️ *Motor reanudado.* Operativa normal.")
+                    log.info("engine_resumed_by_telegram")
+                else:
+                    await self._reply(chat_id, "ℹ️ El motor ya está activo.")
+                processed_cmd = "resume"
+
+            elif cmd == "/kill":
+                self._kill_pending = True
+                self._kill_timestamp = time.time()
+                await self._reply(
+                    chat_id,
+                    "⛔ *Kill Switch*\n\n"
+                    "Esta acción cerrará *todas las posiciones* a precio de mercado "
+                    "y detendrá el motor.\n\n"
+                    "Responde exactamente `CONFIRMAR` en los próximos 60 segundos.\n"
+                    "Cualquier otra respuesta cancela la operación."
+                )
+                processed_cmd = "kill_requested"
+
+            elif cmd.startswith("/"):
+                await self._reply(
+                    chat_id,
+                    "ℹ️ Comando no reconocido.\n"
+                    "Comandos disponibles: /status /pause /resume /kill"
+                )
+
+            # Mensajes sin "/" → ignorar en silencio
+
+        return processed_cmd
+
+    # ── Handlers internos de comandos ─────────────────────────────────────────
+
+    async def _cmd_status(
+        self, chat_id: int, engine_state: Dict[str, Any]
+    ) -> None:
+        """Envía el estado completo del sistema al chat del operador."""
+        capital    = engine_state.get("capital", 0)
+        paused     = engine_state.get("paused", False)
+        pnl        = engine_state.get("pnl_today", 0)
+        dd         = engine_state.get("drawdown_pct", 0)
+        ml_ready   = "✅" if engine_state.get("ml_ready") else "⚠️ Sin entrenar"
+        paper      = "📄 PAPER" if engine_state.get("paper_mode", True) else "🔴 LIVE"
+        positions  = engine_state.get("open_positions", [])
+        state_str  = "⏸ PAUSADO" if paused else "▶️ ACTIVO"
+
+        pos_lines: List[str] = []
+        for p in positions:
+            pos_lines.append(
+                f"  • `{p.get('symbol')}` @ `${p.get('entry_price', 0):.2f}` "
+                f"SL `${p.get('stop_loss', 0):.2f}` TP1 `${p.get('tp1', 0):.2f}`"
+            )
+        pos_text = "\n".join(pos_lines) if pos_lines else "  _Ninguna_"
+
+        msg = (
+            f"*📡 Estado — {paper}*\n\n"
+            f"Motor: {state_str}\n"
+            f"Capital: `${capital:.2f}`\n"
+            f"PnL hoy: `{pnl:+.2f}` USD\n"
+            f"Drawdown: `{dd:.2%}`\n"
+            f"Modelo ML: {ml_ready}\n\n"
+            f"*Posiciones abiertas ({len(positions)}):*\n{pos_text}"
+        )
+        await self._reply(chat_id, msg)
+
+    # ── Helpers HTTP ──────────────────────────────────────────────────────────
+
+    async def _send(self, text: str, pin: bool = False) -> None:
+        """Envía un mensaje al canal principal (self._allowed_chat_id)."""
+        if not self._ready or not self._session:
+            log.debug("telegram_bot_not_ready_skipping_send")
+            return
+        await self._reply(self._allowed_chat_id, text, pin=pin)
+
+    async def _reply(self, chat_id: int, text: str, pin: bool = False) -> None:
+        """Envía un mensaje a un chat_id específico."""
+        if not self._session:
+            return
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        result = await self._call("sendMessage", payload)
+
+        if pin and result and result.get("ok"):
+            msg_id = result["result"]["message_id"]
+            await self._call("pinChatMessage", {"chat_id": chat_id, "message_id": msg_id})
+
+    async def _get_updates(self, timeout: int = 5) -> List[Dict[str, Any]]:
+        """Hace long-polling a getUpdates."""
+        params = {
+            "timeout": timeout,
+            "offset":  self._offset,
+            "allowed_updates": ["message"],
+        }
+        data = await self._call("getUpdates", params, method="GET")
+        return data.get("result", []) if data and data.get("ok") else []
+
+    async def _call(
+        self,
+        method: str,
+        payload: Dict[str, Any],
+        http_method: str = "POST",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Llama a un método de la Telegram Bot API.
+
+        Returns:
+            JSON de respuesta o None si hay error de red/HTTP.
+        """
+        if not self._session:
+            return None
+        url = self._BASE.format(token=self._token, method=method)
+        try:
+            if http_method == "GET":
+                async with self._session.get(url, params=payload) as resp:
+                    return await resp.json()
+            else:
+                async with self._session.post(url, json=payload) as resp:
+                    return await resp.json()
+        except aiohttp.ClientError as exc:
+            log.warning("telegram_http_error", method=method, error=str(exc))
+            return None
+        except asyncio.TimeoutError:
+            log.warning("telegram_timeout", method=method)
+            return None

@@ -1,0 +1,32 @@
+# /etc/systemd/system/trading-retrain.service
+# ══════════════════════════════════════════════════════════════════════════════
+# Servicio one-shot para el re-entrenamiento mensual del MetaLabeler.
+# Se dispara mediante trading-retrain.timer el día 1 de cada mes a las 02:00.
+# ══════════════════════════════════════════════════════════════════════════════
+
+[Unit]
+Description=ML Model Retraining — Trading System ZimaBlade
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=trading
+Group=trading
+WorkingDirectory=/home/trading/sistema_trading
+EnvironmentFile=/home/trading/sistema_trading/.env
+ExecStart=/home/trading/sistema_trading/venv/bin/python ml/retrain_model.py
+
+# 30 minutos máximo (también controlado por SIGALRM en el script)
+TimeoutStartSec=1800
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-retrain
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/trading/sistema_trading /tmp
+PrivateTmp=true

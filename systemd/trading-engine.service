@@ -1,80 +1,53 @@
 # /etc/systemd/system/trading-engine.service
 # ══════════════════════════════════════════════════════════════════════════════
-# Motor principal de Paper‑Trading — Sistema de Trading Algorítmico
+# Motor principal de Paper/Live Trading — ZimaBlade
 #
-# Instalación:
+# Instalación (deploy.sh lo hace automáticamente):
 #   sudo cp systemd/trading-engine.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now trading-engine
-#
-# Gestión:
-#   sudo systemctl start   trading-engine
-#   sudo systemctl stop    trading-engine
-#   sudo systemctl restart trading-engine
-#   journalctl -fu trading-engine
 # ══════════════════════════════════════════════════════════════════════════════
 
 [Unit]
-Description=Trading Algorítmico — Motor de Paper‑Trading (live_engine.py)
-Documentation=https://github.com/TU_USUARIO/Sistema_Trading
-
-# El motor NECESITA PostgreSQL activo antes de arrancar
+Description=Crypto Trading Engine — Sistema de Trading ZimaBlade
+Documentation=file:///home/trading/sistema_trading/README.md
 After=network-online.target postgresql.service
-Wants=network-online.target postgresql.service
-
-# Si PostgreSQL muere, el motor se detiene también
+Wants=network-online.target
 BindsTo=postgresql.service
 
 [Service]
-# ── Identidad ────────────────────────────────────────────────────────────────
-User=ale
-Group=ale
-
-# ── Directorio de trabajo y ejecutable ───────────────────────────────────────
-WorkingDirectory=/home/ale/trading
-
-# Usamos el intérprete dentro del venv del proyecto
-ExecStart=/home/ale/trading/venv/bin/python \
-    /home/ale/trading/scripts/run_paper_trading.py
-
-# ── Variables de entorno ─────────────────────────────────────────────────────
-EnvironmentFile=/home/ale/trading/.env
-Environment=PYTHONUNBUFFERED=1
-Environment=PYTHONPATH=/home/ale/trading
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/home/trading/sistema_trading
+EnvironmentFile=/home/trading/sistema_trading/.env
+ExecStart=/home/trading/sistema_trading/venv/bin/python live_engine.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # ── Reinicio automático ───────────────────────────────────────────────────────
 Restart=on-failure
-RestartSec=30s
-# Número máximo de reinicios en 10 minutos antes de darse por vencido
-StartLimitInterval=600
+RestartSec=30
+# Máximo 5 reinicios en 10 minutos → si persiste el error, no hacer loop infinito
 StartLimitBurst=5
+StartLimitIntervalSec=600
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-# Stdout y stderr van a journald (recuperables con journalctl -fu trading-engine)
+# ── Apagado limpio ────────────────────────────────────────────────────────────
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+
+# ── Logging a journald ────────────────────────────────────────────────────────
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=trading-engine
 
-# ── Seguridad ─────────────────────────────────────────────────────────────────
-# El proceso no puede elevar privilegios
+# ── Hardening de seguridad ────────────────────────────────────────────────────
 NoNewPrivileges=true
-# Acceso limitado al sistema de archivos
 ProtectSystem=strict
-# Permite escribir solo en el directorio del proyecto y en /tmp
-ReadWritePaths=/home/ale/trading /tmp
-# Aísla el namespace de red del proceso
+ProtectHome=read-only
+# El proceso solo puede escribir en el directorio del proyecto
+ReadWritePaths=/home/trading/sistema_trading /tmp
 PrivateTmp=true
-
-# ── Timeout ───────────────────────────────────────────────────────────────────
-# Tiempo máximo para arrancar el proceso
-TimeoutStartSec=120
-# Tiempo para un apagado limpio (el motor cierra posiciones antes de salir)
-TimeoutStopSec=60
-
-# Señal de parada: primero SIGTERM (kill-switch elegante), luego SIGKILL
-KillMode=mixed
-KillSignal=SIGTERM
-FinalKillSignal=SIGKILL
 
 [Install]
 WantedBy=multi-user.target
