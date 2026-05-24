@@ -403,7 +403,7 @@ class TelegramBot:
             "offset":  self._offset,
             "allowed_updates": ["message"],
         }
-        data = await self._call("getUpdates", params, method="GET")
+        data = await self._call("getUpdates", params, http_method="GET")
         return data.get("result", []) if data and data.get("ok") else []
 
     async def _call(
