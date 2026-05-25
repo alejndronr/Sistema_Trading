@@ -216,6 +216,32 @@ sudo -u "${TRADING_USER}" "${VENV_DIR}/bin/pip" install --upgrade pip -q
 sudo -u "${TRADING_USER}" "${VENV_DIR}/bin/pip" install \
     -r "${INSTALL_DIR}/requirements.txt" -q
 
+info "Verificando librerías opcionales..."
+
+sudo -u "${TRADING_USER}" "${VENV_DIR}/bin/python" -c "import smartmoneyconcepts; print('[OK] smart-money-concepts')" \
+    2>/dev/null || warn "smart-money-concepts no disponible — usando fallback custom"
+
+sudo -u "${TRADING_USER}" "${VENV_DIR}/bin/python" -c "import mplfinance; print('[OK] mplfinance — charts habilitados')" \
+    2>/dev/null || warn "mplfinance no disponible — charts Telegram desactivados"
+
+# Test de rendimiento en Atom E3950 (verificar que el RF no es demasiado lento)
+info "Ejecutando test de rendimiento RandomForest en virtualenv..."
+sudo -u "${TRADING_USER}" "${VENV_DIR}/bin/python" -c "
+import time
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+X = np.random.rand(500, 21).astype(np.float32)
+y = (X[:, 0] > 0.5).astype(int)
+rf = RandomForestClassifier(n_estimators=100, max_depth=6, n_jobs=2, random_state=42)
+t0 = time.time()
+rf.fit(X, y)
+elapsed = time.time() - t0
+if elapsed < 30:
+    print(f'[OK] RF training: {elapsed:.1f}s (dentro del límite)')
+else:
+    print(f'[WARN] RF training: {elapsed:.1f}s (muy lento — reducir n_estimators a 50)')
+" 2>/dev/null || warn "No se pudo ejecutar el test de rendimiento RF"
+
 if "${VENV_DIR}/bin/python" -c "import ccxt, pandas, sklearn" 2>/dev/null; then
     ok "Entorno virtual listo con todas las dependencias"
     STATUS[python_venv]="OK"

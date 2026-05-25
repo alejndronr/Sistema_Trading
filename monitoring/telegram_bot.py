@@ -17,10 +17,21 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import io
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+import pandas as pd
+import numpy as np
 import structlog
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")    # headless, sin display
+    import mplfinance as mpf
+    _MPLFINANCE_AVAILABLE = True
+except ImportError:
+    _MPLFINANCE_AVAILABLE = False
 
 log = structlog.get_logger(__name__)
 
@@ -377,6 +388,88 @@ class TelegramBot:
         await self._reply(chat_id, msg)
 
     # ── Helpers HTTP ──────────────────────────────────────────────────────────
+
+    async def send_trade_chart(
+        self,
+        trade: dict,
+        df: pd.DataFrame,
+        reason: str,
+    ) -> None:
+        """
+        Genera gráfico de velas con entry/SL/TP marcados.
+        Completamente en RAM (BytesIO) — nunca toca el HDD mecánico.
+        Si mplfinance no está instalado, el método no hace nada (no crashea).
+        """
+        if not self._ready or not self._session or not _MPLFINANCE_AVAILABLE:
+            return
+
+        try:
+            # Últimas 50 velas (suficiente contexto, ligero para el Atom)
+            chart_df = df.tail(50).copy()
+
+            # Preparar índice temporal
+            if "timestamp" in chart_df.columns:
+                chart_df.index = pd.to_datetime(chart_df["timestamp"], utc=True)
+            chart_df = chart_df[["open", "high", "low", "close", "volume"]].copy()
+            chart_df.columns = ["Open", "High", "Low", "Close", "Volume"]
+            chart_df = chart_df.dropna()
+
+            if len(chart_df) < 10:
+                return
+
+            entry = float(trade.get("entry_price", 0))
+            sl    = float(trade.get("stop_loss", 0))
+            tp1   = float(trade.get("tp1", trade.get("take_profit_1", 0)))
+            tp2   = float(trade.get("tp2", trade.get("take_profit_2", 0)))
+            pnl   = float(trade.get("pnl", 0))
+            sym   = trade.get("symbol", "")
+
+            # Solo niveles válidos
+            levels  = [v for v in [entry, sl, tp1, tp2] if v > 0]
+            colors  = ["white", "red", "lime", "cyan"][:len(levels)]
+            styles  = ["--", "-", "--", "--"][:len(levels)]
+
+            hlines = dict(hlines=levels, colors=colors,
+                          linestyle=styles, linewidths=[1]*len(levels))
+
+            title = f"{sym} | {reason} | PnL: {pnl:+.2f} USD"
+
+            style = mpf.make_mpf_style(
+                base_mpf_style="nightclouds",
+                rc={"font.size": 8},
+            )
+
+            # Generar en BytesIO (RAM pura)
+            buf = io.BytesIO()
+            mpf.plot(
+                chart_df,
+                type="candle",
+                style=style,
+                title=title,
+                volume=True,
+                hlines=hlines if levels else {},
+                figsize=(9, 5),   # más pequeño para menos RAM
+                savefig=dict(fname=buf, dpi=80, bbox_inches="tight"),
+            )
+            buf.seek(0)
+            img_bytes = buf.read()
+            buf.close()  # liberar RAM inmediatamente
+
+            # Enviar por Telegram
+            url  = self._BASE.format(token=self._token, method="sendPhoto")
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(self._allowed_chat_id))
+            form.add_field("caption", title)
+            form.add_field("photo", img_bytes,
+                           filename="trade.png", content_type="image/png")
+
+            async with self._session.post(url, data=form) as resp:
+                if resp.status != 200:
+                    log.warning("chart_send_failed", status=resp.status)
+
+        except Exception as exc:
+            # NUNCA crashear el engine por un gráfico fallido
+            log.warning("chart_generation_failed", error=str(exc))
 
     async def _send(self, text: str, pin: bool = False) -> None:
         """Envía un mensaje al canal principal (self._allowed_chat_id)."""

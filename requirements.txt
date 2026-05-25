@@ -40,3 +40,8 @@ apscheduler>=3.10.0          # Job scheduler for live trading (Phase 2+)
 python-dateutil>=2.9.0       # Date parsing utilities
 pytz>=2024.1                 # Timezone handling
 tqdm>=4.66.0                 # Progress bars for data downloads
+
+# ── Optional/V3.0 Libraries (with fallbacks) ───────────────────────────────────
+smart-money-concepts>=0.0.10   # Fallback to custom indicators/market_structure
+mplfinance>=0.12.10b0          # Fallback to text notifications if unavailable
+

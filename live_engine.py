@@ -100,6 +100,8 @@ class LiveEngine:
         self._bot: Optional[TelegramBot] = None
         self._ml: Optional[MetaLabeler] = None
         self._db_engine: Optional[Any] = None
+        self._ml_threshold: float = 0.60
+        self._last_df: Dict[str, pd.DataFrame] = {}
 
     # ══════════════════════════════════════════════════════════════════════════
     # Arranque y parada
@@ -154,7 +156,12 @@ class LiveEngine:
         # ── 4. Cargar modelo ML ───────────────────────────────────────────────
         self._ml = MetaLabeler(model_path=str(PROJECT_ROOT / "ml" / "model.joblib"))
         self.state["ml_ready"] = self._ml.is_ready()
-        if not self.state["ml_ready"]:
+        if self._ml and self._ml.is_ready():
+            meta = self._ml.get_metadata()
+            self._ml_threshold = meta.get("optimal_threshold", 0.60)
+            log.info("ml_threshold_loaded", threshold=self._ml_threshold)
+        else:
+            self._ml_threshold = 0.60
             log.warning(
                 "ml_model_not_ready",
                 detail="Operando con umbral permisivo (proba=0.5)",
@@ -329,11 +336,14 @@ class LiveEngine:
             log.info("max_positions_reached", current=len(open_positions), max=MAX_POSITIONS)
             return
 
-        # ── 4d. MetaLabeler ───────────────────────────────────────────────────
-        features = self._extract_features(last)
-        ml_proba = self._ml.predict_proba(features) if self._ml else 0.5
+        if not hasattr(self, '_last_df'):
+            self._last_df = {}
+        self._last_df[symbol] = df
 
-        if ml_proba < ML_THRESHOLD:
+        # ── 4d. MetaLabeler ───────────────────────────────────────────────────
+        ml_proba = self._ml.predict_proba(df) if self._ml else 0.5
+
+        if ml_proba < self._ml_threshold:
             log.info("signal_filtered_by_ml", symbol=symbol, proba=f"{ml_proba:.2%}")
             if self._bot:
                 await self._bot.send_signal_filtered(symbol, "trend_following", ml_proba)
@@ -412,6 +422,11 @@ class LiveEngine:
             for ct in closed_trades:
                 if self._bot:
                     await self._bot.send_trade_close(ct, ct["exit_reason"])
+                    if self._bot and hasattr(self, '_last_df'):
+                        symbol = ct.get("symbol", "")
+                        df_chart = self._last_df.get(symbol)
+                        if df_chart is not None:
+                            await self._bot.send_trade_chart(ct, df_chart, ct["exit_reason"])
 
             # ── 3. Actualizar estado compartido ───────────────────────────────
             capital = await self._portfolio.get_current_capital()

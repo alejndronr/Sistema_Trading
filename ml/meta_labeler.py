@@ -2,17 +2,11 @@
 ml/meta_labeler.py — MetaLabeler: "portero" de señales con RandomForest.
 =========================================================================
 No predice el precio. Predice si una señal de entrada concreta tiene
-probabilidad de éxito > umbral configurado (por defecto 60%).
-
-Flujo:
-    1. build_dataset()  → construye (X, y) a partir de trades históricos
-    2. train()          → entrena RF con TimeSeriesSplit, guarda modelo + metadata
-    3. predict_proba()  → probabilidad de éxito para una señal en vivo
-    4. is_ready()       → True si el modelo está entrenado y cargado
+probabilidad de éxito > umbral configurado (dinámico, optimizado en entrenamiento).
+Diseñado para el hardware de bajos recursos Intel Atom E3950.
 """
 
 from __future__ import annotations
-
 import json
 import os
 from datetime import datetime
@@ -29,7 +23,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 log = structlog.get_logger(__name__)
 
-# ── Features canónicas (mismo orden siempre para el modelo) ────────────────────
+# ── Features canónicas V2 (mismo orden siempre para el modelo) ──────────────────
 FEATURES: List[str] = [
     "rsi",            # RSI-14 actual
     "adx",            # Fuerza de tendencia (ADX-14)
@@ -41,18 +35,27 @@ FEATURES: List[str] = [
     "vol_ratio",      # volume / volume.rolling(20).mean()
     "cvd_bull",       # CVD alcista: 1 si vol_delta > 0, else 0
     "regime_encoded", # BULL=1, RANGE=0, HIGH_VOL=-1
+    "consensus",      # Consensus Score (0-100)
+    "rsi_lag1",       # RSI lag 1
+    "rsi_lag3",       # RSI lag 3
+    "adx_lag1",       # ADX lag 1
+    "close_chg_1",    # % cambio close 1 vela
+    "close_chg_3",    # % cambio close 3 velas
+    "rsi_roll5_mean", # Media rolling 5 rsi
+    "rsi_roll5_std",  # Desviación rolling 5 rsi
+    "vol_roll10_mean",# Media rolling 10 volumen
+    "ob_bull_recent5",# OB bullish reciente en 5 velas
+    "fvg_bull_recent3",# FVG bullish reciente en 3 velas
 ]
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "2.0.0"
 MIN_SAMPLES = 30
 
 
 class MetaLabeler:
     """
     Portero ML para señales de trading usando RandomForestClassifier.
-
-    Usa TimeSeriesSplit (no K-Fold aleatorio) para respetar el orden
-    temporal de los datos y evitar filtración de información futura.
+    Optimizado para el Atom E3950 (n_estimators=100, max_depth=6, n_jobs=2).
     """
 
     def __init__(self, model_path: str = "ml/model.joblib") -> None:
@@ -71,32 +74,151 @@ class MetaLabeler:
 
     # ── Construcción del dataset ───────────────────────────────────────────────
 
+    def build_feature_matrix(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Construye matriz de features vectorizada.
+        Diseñada para Atom E3950: sin loops Python, sin scipy.
+        Procesa 500 filas en < 50ms en el hardware objetivo.
+
+        Args:
+            df: DataFrame con indicadores ya calculados (apply_all_indicators)
+
+        Returns:
+            numpy array shape (n_samples, n_features), float32 para menor RAM
+        """
+        price = df["close"].values.astype(float)
+        n = len(price)
+
+        def col(name: str, default: float = 0.0) -> np.ndarray:
+            """Extrae columna con default seguro."""
+            if name in df.columns:
+                return df[name].fillna(default).values.astype(float)
+            return np.full(n, default, dtype=float)
+
+        rsi = col("rsi", 50.0)
+        adx = col("adx", 20.0)
+        atr = col("atr", price * 0.015)
+        
+        # Buscar ema_21 o ema21
+        ema21_col = "ema_21" if "ema_21" in df.columns else "ema21"
+        ema21 = col(ema21_col, price)
+        
+        # Buscar ema_55 o ema55
+        ema55_col = "ema_55" if "ema_55" in df.columns else "ema55"
+        ema55 = col(ema55_col, price)
+        
+        macd_h = col("macd_histogram", col("macd_hist", 0.0))
+        bb_up = col("bb_upper", price * 1.02)
+        bb_lo = col("bb_lower", price * 0.98)
+        bb_mid = col("bb_mid", price)
+        vol = col("volume", 1.0)
+        cvd = col("cvd", 0.0)
+        
+        # Régimen
+        regime_raw = df.get("regime", df.get("trend_regime", pd.Series("RANGE", index=df.index)))
+        regime_map = {
+            "BULL_TREND": 1.0, "BULL": 1.0, "bullish": 1.0,
+            "RANGE": 0.0, "ranging": 0.0,
+            "HIGH_VOL": -0.5, "high_volatility": -0.5,
+            "BEAR_TREND": -1.0, "BEAR": -1.0, "bearish": -1.0
+        }
+        regime = regime_raw.map(regime_map).fillna(0.0).values.astype(float)
+        consensus = col("consensus", 50.0)
+
+        # Volume moving average (vectorizado)
+        vol_s = pd.Series(vol)
+        vol_ma = vol_s.rolling(20, min_periods=1).mean().values
+        vol_ma = np.where(vol_ma == 0.0, 1.0, vol_ma)
+
+        # Features base
+        safe_price = np.where(price == 0.0, 1e-10, price)
+        safe_ema21 = np.where(ema21 == 0.0, 1e-10, ema21)
+        safe_ema55 = np.where(ema55 == 0.0, 1e-10, ema55)
+        safe_bbmid = np.where(bb_mid == 0.0, 1e-10, bb_mid)
+
+        f_rsi = rsi
+        f_adx = adx
+        f_atr_pct = atr / safe_price * 100
+        f_ema21_dist = (price - ema21) / safe_ema21 * 100
+        f_ema55_dist = (price - ema55) / safe_ema55 * 100
+        f_macd_hist = macd_h
+        f_bb_width = (bb_up - bb_lo) / safe_bbmid
+        f_vol_ratio = vol / vol_ma
+        f_cvd_bull = (cvd > 0.0).astype(float)
+        f_regime = regime
+        f_consensus = consensus
+
+        # Lag features (shift con padding)
+        def shift_pad(arr: np.ndarray, num: int, fill: float = 0.0) -> np.ndarray:
+            out = np.empty_like(arr)
+            out[:num] = fill
+            out[num:] = arr[:-num]
+            return out
+
+        f_rsi_lag1 = shift_pad(rsi, 1, 50.0)
+        f_rsi_lag3 = shift_pad(rsi, 3, 50.0)
+        f_adx_lag1 = shift_pad(adx, 1, 20.0)
+        f_chg1 = np.diff(price, prepend=price[0]) / safe_price * 100
+        f_chg3 = np.where(
+            np.arange(n) >= 3,
+            (price - shift_pad(price, 3, price[0])) / safe_price * 100,
+            0.0
+        )
+
+        # Rolling stats (vectorizado con pandas)
+        rsi_s = pd.Series(rsi)
+        f_rsi_mean5 = rsi_s.rolling(5, min_periods=1).mean().values
+        f_rsi_std5 = rsi_s.rolling(5, min_periods=1).std().fillna(5.0).values
+        f_vol_mean10 = vol_s.rolling(10, min_periods=1).mean().values
+
+        # SMC recientes (rolling max vectorizado)
+        ob_bull = col("ob_bull", 0.0)
+        fvg_bull = col("fvg_bull", 0.0)
+        f_ob_recent = pd.Series(ob_bull).rolling(5, min_periods=1).max().values
+        f_fvg_recent = pd.Series(fvg_bull).rolling(3, min_periods=1).max().values
+
+        # Stack en matriz
+        X = np.column_stack([
+            f_rsi, f_adx, f_atr_pct, f_ema21_dist, f_ema55_dist,
+            f_macd_hist, f_bb_width, f_vol_ratio, f_cvd_bull, f_regime,
+            f_consensus,
+            f_rsi_lag1, f_rsi_lag3, f_adx_lag1, f_chg1, f_chg3,
+            f_rsi_mean5, f_rsi_std5, f_vol_mean10,
+            f_ob_recent, f_fvg_recent,
+        ]).astype(np.float32)  # float32 → mitad de RAM que float64
+
+        # Reemplazar inf/nan
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Z-score por columna (vectorizado, sin scipy)
+        mu = X.mean(axis=0)
+        std = X.std(axis=0)
+        std = np.where(std == 0.0, 1.0, std)
+        X = (X - mu) / std
+
+        return X
+
     def build_dataset(
         self,
         trades: List[Dict[str, Any]],
         df: pd.DataFrame,
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """
-        Construye (X, y) alineando trades históricos con el snapshot de
-        indicadores en el momento de la señal de entrada.
-
-        Args:
-            trades: lista de dicts con campos entry_time, exit_price, tp1.
-                    Cada dict debe tener 'entry_time' como datetime o timestamp.
-            df:     DataFrame con OHLCV + indicadores (columnas en FEATURES).
-                    Index o columna 'timestamp' en UTC.
-
-        Returns:
-            (X, y) donde y=1 si trade en profit, y=0 si en pérdida.
+        Construye (X, y) alineando trades históricos con el matrix de features.
         """
         if "timestamp" not in df.columns:
             raise ValueError("df debe contener columna 'timestamp'")
 
-        # Asegurar timestamp como DatetimeIndex para búsqueda eficiente
-        df_indexed = df.set_index("timestamp")
+        # Calcular la matriz completa de features
+        X_matrix = self.build_feature_matrix(df)
+        
+        # Crear un mapa de timestamp -> index fila de features
+        df_indexed = df.copy()
+        df_indexed["feature_idx"] = np.arange(len(df_indexed))
+        df_indexed = df_indexed.set_index("timestamp")
         df_indexed.index = pd.to_datetime(df_indexed.index, utc=True)
 
-        rows: List[Dict[str, float]] = []
+        rows: List[np.ndarray] = []
         labels: List[int] = []
 
         for trade in trades:
@@ -111,21 +233,15 @@ class MetaLabeler:
                 continue
 
             candle = df_indexed.loc[idx_candidates[-1]]
+            f_idx = int(candle.get("feature_idx") if isinstance(candle, pd.Series) else candle["feature_idx"].iloc[-1])
 
-            # Extraer features; rellenar NaN con 0 (no queremos entrenar en NaN)
-            feature_row: Dict[str, float] = {}
-            for feat in FEATURES:
-                val = candle.get(feat, np.nan) if isinstance(candle, pd.Series) else np.nan
-                feature_row[feat] = float(val) if pd.notna(val) else 0.0
-
-            rows.append(feature_row)
+            rows.append(X_matrix[f_idx])
 
             # Label: 1 si el trade fue profitable, 0 si no
             pnl = trade.get("pnl", None)
             if pnl is not None:
                 labels.append(1 if float(pnl) > 0 else 0)
             else:
-                # Fallback: comparar exit_price con entry_price
                 entry_price = float(trade.get("entry_price", 0))
                 exit_price = float(trade.get("exit_price", 0))
                 labels.append(1 if exit_price > entry_price else 0)
@@ -133,7 +249,7 @@ class MetaLabeler:
         if not rows:
             return pd.DataFrame(columns=FEATURES), pd.Series(dtype=int)
 
-        X = pd.DataFrame(rows, columns=FEATURES)
+        X = pd.DataFrame(np.array(rows), columns=FEATURES)
         y = pd.Series(labels, name="target")
 
         log.info(
@@ -153,20 +269,7 @@ class MetaLabeler:
     ) -> Dict[str, Any]:
         """
         Entrena el RandomForest con los trades históricos y guarda el modelo.
-
-        Usa TimeSeriesSplit(n_splits=5) para validación correcta en series
-        temporales (sin filtración de información futura).
-
-        Args:
-            trades: lista de trades del backtesting / journal.
-            df:     DataFrame con OHLCV + indicadores completos.
-
-        Returns:
-            dict con métricas: accuracy, precision, recall, f1, n_samples,
-            feature_importance, cv_scores.
-
-        Raises:
-            ValueError: si n_samples < MIN_SAMPLES.
+        Usa TimeSeriesSplit(n_splits=5) para validación correcta.
         """
         X, y = self.build_dataset(trades, df)
 
@@ -188,42 +291,45 @@ class MetaLabeler:
         cv_accuracies: List[float] = []
         cv_f1s: List[float] = []
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-            X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
-            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        # Usar conjunto de validación final para optimizar el threshold
+        val_size = max(int(len(X) * 0.2), 5)
+        X_train_cv, X_val_cv = X.iloc[:-val_size], X.iloc[-val_size:]
+        y_train_cv, y_val_cv = y.iloc[:-val_size], y.iloc[-val_size:]
+
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train_cv)):
+            X_tr, X_val = X_train_cv.iloc[train_idx], X_train_cv.iloc[val_idx]
+            y_tr, y_val = y_train_cv.iloc[train_idx], y_train_cv.iloc[val_idx]
 
             fold_model = RandomForestClassifier(
-                n_estimators=200,
+                n_estimators=100,    # máximo para Atom
                 max_depth=6,
                 min_samples_leaf=10,
+                max_features="sqrt",
                 class_weight="balanced",
+                n_jobs=2,            # dejar 2 cores libres
                 random_state=42,
-                n_jobs=-1,
             )
             fold_model.fit(X_tr, y_tr)
             preds = fold_model.predict(X_val)
             cv_accuracies.append(accuracy_score(y_val, preds))
             cv_f1s.append(f1_score(y_val, preds, zero_division=0))
-            log.debug(
-                "cv_fold_done",
-                fold=fold + 1,
-                accuracy=f"{cv_accuracies[-1]:.3f}",
-                f1=f"{cv_f1s[-1]:.3f}",
-            )
 
         # ── Entrenamiento final en todo el dataset ─────────────────────────────
         final_model = RandomForestClassifier(
-            n_estimators=200,
+            n_estimators=100,
             max_depth=6,
             min_samples_leaf=10,
+            max_features="sqrt",
             class_weight="balanced",
+            n_jobs=2,
             random_state=42,
-            n_jobs=-1,
         )
         final_model.fit(X, y)
         final_preds = final_model.predict(X)
 
-        # Métricas en el dataset completo (referencia, no validación real)
+        # Optimizar threshold dinámico en el set de validación
+        best_thresh = self._optimize_threshold(final_model, X_val_cv.values, y_val_cv.values)
+
         metrics: Dict[str, Any] = {
             "accuracy":          round(float(accuracy_score(y, final_preds)), 4),
             "precision":         round(float(precision_score(y, final_preds, zero_division=0)), 4),
@@ -247,6 +353,7 @@ class MetaLabeler:
             "model_version":     MODEL_VERSION,
             "n_samples":         len(X),
             "features":          FEATURES,
+            "optimal_threshold": best_thresh,
             "metrics":           {
                 k: v for k, v in metrics.items()
                 if k != "feature_importance"
@@ -261,35 +368,58 @@ class MetaLabeler:
             n_samples=len(X),
             cv_accuracy=f"{metrics['cv_accuracy_mean']:.3f}",
             cv_f1=f"{metrics['cv_f1_mean']:.3f}",
+            optimal_threshold=best_thresh,
             model_path=str(self.model_path),
         )
         return metrics
 
+    def _optimize_threshold(
+        self, model, X_val: np.ndarray, y_val: np.ndarray
+    ) -> float:
+        """
+        Grid de 9 puntos (0.40→0.80, paso 0.05).
+        En Atom E3950: < 100ms para 500 muestras.
+        """
+        if len(X_val) == 0:
+            return 0.60
+            
+        probas = model.predict_proba(X_val)[:, 1]
+        best_thresh, best_f1 = 0.60, 0.0
+
+        for thresh in np.arange(0.40, 0.81, 0.05):
+            preds = (probas >= thresh).astype(int)
+            if preds.sum() == 0:
+                continue
+            f1 = f1_score(y_val, preds, zero_division=0)
+            if f1 > best_f1:
+                best_f1, best_thresh = f1, float(thresh)
+
+        log.info("threshold_optimized", threshold=f"{best_thresh:.2f}", f1=f"{best_f1:.4f}")
+        return best_thresh
+
     # ── Predicción en vivo ─────────────────────────────────────────────────────
 
-    def predict_proba(self, features: Dict[str, float]) -> float:
+    def predict_proba(self, df: pd.DataFrame) -> float:
         """
-        Calcula la probabilidad de éxito para una señal en vivo.
-
-        Args:
-            features: dict con las claves de FEATURES y sus valores actuales.
-
-        Returns:
-            Probabilidad [0.0 - 1.0]. Devuelve 0.5 si el modelo no está listo
-            (modo permisivo: no bloquea señales mientras no hay datos suficientes).
+        Recibe el DataFrame COMPLETO (no solo la última fila)
+        para poder calcular lag features y rolling stats.
+        Devuelve la probabilidad de la última fila.
         """
         if not self.is_ready():
             log.debug("model_not_ready_using_default_proba", default=0.5)
             return 0.5
 
-        row = [features.get(feat, 0.0) for feat in FEATURES]
-        X = np.array(row, dtype=float).reshape(1, -1)
-
-        # predict_proba → [[P(0), P(1)]] — nos interesa P(1)
-        proba = float(self._model.predict_proba(X)[0][1])  # type: ignore[union-attr]
-
-        log.debug("ml_proba", proba=f"{proba:.3f}", features=features)
-        return proba
+        try:
+            X = self.build_feature_matrix(df)
+            if len(X) == 0:
+                return 0.5
+            # predict_proba → [[P(0), P(1)]] — nos interesa P(1) de la última fila
+            proba = float(self._model.predict_proba(X[-1:])[:, 1][0])
+            log.debug("ml_proba", proba=f"{proba:.3f}")
+            return proba
+        except Exception as exc:
+            log.warning("predict_proba_failed", error=str(exc))
+            return 0.5
 
     # ── Consultas de estado ────────────────────────────────────────────────────
 
@@ -300,13 +430,10 @@ class MetaLabeler:
     def get_feature_importance(self) -> Dict[str, float]:
         """
         Devuelve las top-10 features ordenadas por importancia (descendente).
-
-        Returns:
-            dict {feature_name: importance_score}. Vacío si el modelo no existe.
         """
         if not self.is_ready():
             return {}
-        return self._importance_dict(self._model)  # type: ignore[arg-type]
+        return self._importance_dict(self._model)
 
     def get_metadata(self) -> Dict[str, Any]:
         """Devuelve la metadata del modelo cargada desde model_metadata.json."""

@@ -171,7 +171,8 @@ class TrendIndicatorParams:
     supertrend_factor: float = 3.0
     adx_period: int = 14
     adx_trend_threshold: float = 20.0   # ADX > 20 para operar
-    adx_strong_threshold: float = 25.0  # ADX > 25 para tendencia fuerte
+    adx_strong_threshold: float = 20.0  # ADX > 20 para tendencia fuerte (era 25)
+    pullback_pct: float = 0.02           # ±2% de pullback (era 0.005)
 
 
 @dataclass
@@ -179,8 +180,8 @@ class MomentumIndicatorParams:
     rsi_period: int = 14
     rsi_overbought: float = 70.0
     rsi_oversold: float = 30.0
-    rsi_neutral_low: float = 45.0    # Zona neutra para trend following
-    rsi_neutral_high: float = 65.0
+    rsi_neutral_low: float = 40.0    # Zona neutra para trend following (era 45)
+    rsi_neutral_high: float = 70.0   # (era 65)
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -237,9 +238,10 @@ INDICATORS = IndicatorParams()
 class TrendFollowingParams:
     """Parámetros exactos de Estrategia 1: Trend Following."""
     # Condiciones de entrada
-    min_adx: float = 25.0
-    rsi_min: float = 45.0
-    rsi_max: float = 65.0
+    min_adx: float = 20.0             # era 25
+    rsi_min: float = 40.0             # era 45
+    rsi_max: float = 70.0             # era 65
+    pullback_pct: float = 0.02        # era 0.005 (±2%)
     # Gestión de trade
     sl_atr_multiplier: float = 1.0    # SL = 1 ATR bajo swing low
     tp1_rr_ratio: float = 2.0         # TP1 = 2:1 R/R mínimo
