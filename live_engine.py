@@ -299,14 +299,16 @@ class LiveEngine:
             log.error("signals_module_not_found")
             return
 
-        df = df.dropna()
+        # Excluir columnas SMC sparse del dropna (tienen NaN por diseño)
+        smc_cols = [c for c in df.columns if any(x in c for x in ["ob_top","ob_bot","ob_bull_high","ob_bull_low","ob_bear_high","ob_bear_low","fvg_top","fvg_bot","fvg_bull_top","fvg_bull_bottom","fvg_bear_top","fvg_bear_bottom","swing_high_price","swing_low_price","last_swing"])]
+        df = df.drop(columns=smc_cols, errors="ignore").dropna()
         if df.empty:
             return
 
         last = df.iloc[-1]
 
         # ── 4. Verificar señal en la última vela ──────────────────────────────
-        signal_col = "signal_trend"    # columna producida por signals.py
+        signal_col = "tf_long_signal"    # columna producida por signals.py
         if signal_col not in df.columns or not bool(last.get(signal_col, False)):
             log.debug("no_signal", symbol=symbol)
             return

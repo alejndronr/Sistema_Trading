@@ -15,15 +15,9 @@ log = structlog.get_logger(__name__)
 
 def add_market_structure(df: pd.DataFrame) -> pd.DataFrame:
     """
-    SMC mejorado. Usa smart-money-concepts si está instalado,
-    fallback a implementación custom si no.
+    SMC custom — estable, sin dependencias externas.
     """
-    try:
-        import smartmoneyconcepts as smc_lib
-        return _add_market_structure_smc(df, smc_lib)
-    except ImportError:
-        log.warning("smc_library_not_found_using_fallback")
-        return _add_market_structure_custom(df)
+    return _add_market_structure_custom(df)
 
 
 def _add_market_structure_smc(df: pd.DataFrame, smc_lib) -> pd.DataFrame:
@@ -32,26 +26,26 @@ def _add_market_structure_smc(df: pd.DataFrame, smc_lib) -> pd.DataFrame:
 
     try:
         # Swing Highs/Lows
-        swing = smc_lib.swing_highs_lows(ohlc, swing_length=10)
+        swing = smc_lib.smc.swing_highs_lows(ohlc, swing_length=10)
         df["swing_high"] = swing["HighLow"].eq(1).astype(int)
         df["swing_low"]  = swing["HighLow"].eq(-1).astype(int)
 
         # BOS y CHoCH
-        bos = smc_lib.bos_choch(ohlc, swing, close_break=True)
+        bos = smc_lib.smc.bos_choch(ohlc, swing, close_break=True)
         df["bos_bull"]   = bos["BOS"].eq(1).fillna(False)
         df["bos_bear"]   = bos["BOS"].eq(-1).fillna(False)
         df["choch_bull"] = bos["CHOCH"].eq(1).fillna(False)
         df["choch_bear"] = bos["CHOCH"].eq(-1).fillna(False)
 
         # Order Blocks
-        ob = smc_lib.ob(ohlc, swing)
+        ob = smc_lib.smc.ob(ohlc, swing)
         df["ob_bull"] = ob["OB"].eq(1).fillna(False)
         df["ob_bear"] = ob["OB"].eq(-1).fillna(False)
         df["ob_top"]  = ob["Top"].fillna(np.nan)
         df["ob_bot"]  = ob["Bottom"].fillna(np.nan)
 
         # Fair Value Gaps
-        fvg = smc_lib.fvg(ohlc, join_consecutive=True)
+        fvg = smc_lib.smc.fvg(ohlc, join_consecutive=True)
         df["fvg_bull"] = fvg["FVG"].eq(1).fillna(False)
         df["fvg_bear"] = fvg["FVG"].eq(-1).fillna(False)
         df["fvg_top"]  = fvg["Top"].fillna(np.nan)
@@ -59,7 +53,7 @@ def _add_market_structure_smc(df: pd.DataFrame, smc_lib) -> pd.DataFrame:
 
         # Equal Highs/Lows — NUEVO (liquidity pools)
         try:
-            liq = smc_lib.liquidity(ohlc, swing, range_percent=0.01)
+            liq = smc_lib.smc.liquidity(ohlc, swing, range_percent=0.01)
             df["liq_high"] = liq["Liquidity"].eq(1).fillna(False)
             df["liq_low"]  = liq["Liquidity"].eq(-1).fillna(False)
         except Exception:
@@ -74,32 +68,53 @@ def _add_market_structure_smc(df: pd.DataFrame, smc_lib) -> pd.DataFrame:
 
 
 def _add_market_structure_custom(df: pd.DataFrame) -> pd.DataFrame:
-    """Fallback: implementación custom original."""
+    """
+    Implementación custom de SMC — sin dependencias externas.
+    Order Blocks, FVG, BOS/CHoCH calculados directamente sobre OHLCV.
+    """
     df = df.copy()
-    
-    # Asegurar que se calculan los indicadores de estructura originales
-    from indicators.market_structure import MarketStructureIndicators
-    df = MarketStructureIndicators().calculate_all(df)
-    
-    # Mapear columnas originales a los nombres simplificados/esperados:
-    df["ob_bull"] = df.get("order_block_bullish", False)
-    df["ob_bear"] = df.get("order_block_bearish", False)
-    df["ob_top"] = df.get("ob_bull_high", np.nan)
-    df["ob_bot"] = df.get("ob_bull_low", np.nan)
-    
-    df["bos_bull"] = df.get("bos_bullish", False)
-    df["bos_bear"] = df.get("bos_bearish", False)
-    df["choch_bull"] = df.get("choch_bullish", False)
-    df["choch_bear"] = df.get("choch_bearish", False)
-    
-    df["fvg_bull"] = df.get("fvg_bullish", False)
-    df["fvg_bear"] = df.get("fvg_bearish", False)
-    df["fvg_top"] = df.get("fvg_bull_top", np.nan)
-    df["fvg_bot"] = df.get("fvg_bull_bottom", np.nan)
-    
-    df["liq_high"] = False
-    df["liq_low"] = False
-    
+    high  = df["high"]
+    low   = df["low"]
+    close = df["close"]
+    open_ = df["open"]
+
+    # ── Swing Highs/Lows (ventana 5 velas) ───────────────────────────────────
+    swing_len = 5
+    df["swing_high"] = (
+        (high == high.rolling(swing_len * 2 + 1, center=True).max())
+    ).astype(int)
+    df["swing_low"] = (
+        (low == low.rolling(swing_len * 2 + 1, center=True).min())
+    ).astype(int)
+
+    # ── Order Blocks ──────────────────────────────────────────────────────────
+    # Bullish OB: vela bajista justo antes de un BOS alcista
+    bearish_candle = close < open_
+    bullish_move   = close > close.shift(1)
+    df["ob_bull"] = (bearish_candle.shift(1) & bullish_move).fillna(False)
+    df["ob_bear"] = (~bearish_candle.shift(1).astype(bool) & ~bullish_move.astype(bool)).fillna(False)
+    df["ob_top"]  = np.where(df["ob_bull"], high.shift(1), np.nan)
+    df["ob_bot"]  = np.where(df["ob_bull"], low.shift(1),  np.nan)
+
+    # ── Fair Value Gaps ───────────────────────────────────────────────────────
+    # Bullish FVG: low[i] > high[i-2] (gap alcista de 3 velas)
+    df["fvg_bull"] = (low > high.shift(2)).fillna(False)
+    df["fvg_bear"] = (high < low.shift(2)).fillna(False)
+    df["fvg_top"]  = np.where(df["fvg_bull"], low,         np.nan)
+    df["fvg_bot"]  = np.where(df["fvg_bull"], high.shift(2), np.nan)
+
+    # ── BOS / CHoCH (Break of Structure / Change of Character) ───────────────
+    prev_high = high.rolling(10).max().shift(1)
+    prev_low  = low.rolling(10).min().shift(1)
+    df["bos_bull"]   = (close > prev_high).fillna(False)
+    df["bos_bear"]   = (close < prev_low).fillna(False)
+    df["choch_bull"] = (df["bos_bull"] & df["swing_low"].shift(1).astype(bool)).fillna(False)
+    df["choch_bear"] = (df["bos_bear"] & df["swing_high"].shift(1).astype(bool)).fillna(False)
+
+    # ── Liquidity pools ───────────────────────────────────────────────────────
+    df["liq_high"] = df["swing_high"].astype(bool)
+    df["liq_low"]  = df["swing_low"].astype(bool)
+
     return df
 
 
