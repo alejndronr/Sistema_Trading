@@ -14,9 +14,7 @@ log = structlog.get_logger(__name__)
 
 
 def add_market_structure(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    SMC custom — estable, sin dependencias externas.
-    """
+    """SMC custom — sin dependencias externas, estable en producción."""
     return _add_market_structure_custom(df)
 
 

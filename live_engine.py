@@ -47,8 +47,8 @@ ENGINE_VERSION = "2.0.0"
 
 # ── Parámetros fijos (reflejo de los del Master Prompt) ───────────────────────
 SYMBOLS          = ["BTC/USDT", "ETH/USDT"]
-TIMEFRAME        = "4h"
-TIMEFRAME_SECS   = 4 * 3600
+TIMEFRAME        = "1h"
+TIMEFRAME_SECS   = 1 * 3600
 MAX_POSITIONS    = 3
 ML_THRESHOLD     = 0.60
 RISK_PCT         = 0.01           # 1% del capital por trade
@@ -243,7 +243,7 @@ class LiveEngine:
         """Genera señales en cada cierre de vela 4H."""
         while self._running:
             # Esperar al próximo cierre de vela
-            wait_secs = self._next_4h_candle_close()
+            wait_secs = self._next_candle_close()
             log.debug("loop_slow_waiting", seconds=int(wait_secs))
             await asyncio.sleep(wait_secs + 5)   # +5s margen para que la vela cierre
 
@@ -707,7 +707,7 @@ class LiveEngine:
         }
 
     @staticmethod
-    def _next_4h_candle_close() -> float:
+    def _next_candle_close() -> float:
         """
         Calcula los segundos hasta el próximo cierre de vela 4H UTC.
 

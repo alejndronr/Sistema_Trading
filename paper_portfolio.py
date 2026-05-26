@@ -524,15 +524,15 @@ class PaperPortfolio:
         Returns:
             dict: trades_today, pnl_today, wins_today, losses_today.
         """
-        today = date.today().isoformat()
+        today = date.today()
         async with self._session_factory() as session:
             result = await session.execute(
                 text("""
                     SELECT
                         COUNT(*)                          AS trades,
                         COALESCE(SUM(pnl), 0)            AS pnl,
-                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                        SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) AS losses
+                        COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                        COALESCE(SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses
                     FROM trades_journal
                     WHERE exit_time::date = :today
                 """),
