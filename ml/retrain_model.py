@@ -88,30 +88,21 @@ def _send_telegram(message: str) -> None:
 
 
 # ── Carga de datos desde PostgreSQL ────────────────────────────────────────────
-def _load_trades_from_db(engine: Any, since: datetime) -> pd.DataFrame:
-    """
-    Carga los trades del journal desde PostgreSQL.
-
-    Args:
-        engine: SQLAlchemy engine conectado a PostgreSQL.
-        since:  fecha de corte (18 meses atrás).
-
-    Returns:
-        DataFrame con las columnas del trades_journal.
-    """
-    query = text("""
-        SELECT *
-        FROM trades_journal
-        WHERE entry_time >= :since
-          AND exit_time IS NOT NULL
-        ORDER BY entry_time ASC
-    """)
-    with engine.connect() as conn:
-        result = conn.execute(query, {"since": since})
-        df = pd.DataFrame(result.fetchall(), columns=result.keys())
-
-    log.info("trades_loaded", n_trades=len(df), since=str(since.date()))
-    return df
+def _load_trades_from_db(engine_ignorado, since):
+    import pandas as pd
+    from sqlalchemy import create_engine
+    # Forzamos una conexión síncrona local absoluta
+    sync_engine = create_engine("postgresql://trading_user:DS0GCdCE7eBVMypeZJ1Ig@127.0.0.1:5432/trading_db")
+    try:
+        df = pd.read_sql("SELECT * FROM trades", sync_engine)
+        if 'entry_time' in df.columns:
+            df['entry_time'] = pd.to_datetime(df['entry_time'])
+            if since:
+                df = df[df['entry_time'] >= pd.to_datetime(since)]
+        return df
+    except Exception as e:
+        print(f"Error leyendo base de datos (ML): {e}")
+        return pd.DataFrame()
 
 
 def _load_ohlcv_from_db(
