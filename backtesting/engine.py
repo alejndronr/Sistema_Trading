@@ -14,9 +14,9 @@ Características:
 Uso:
     engine = BacktestEngine(initial_capital=300)
     results = engine.run(
-        symbol="BTC/USDT",
+        symbol="BTC/USDC",
         df=ohlcv_df,
-        strategy=TrendFollowingStrategy("BTC/USDT"),
+        strategy=TrendFollowingStrategy("BTC/USDC"),
     )
     print(results.metrics.summary())
 """
@@ -134,7 +134,7 @@ class BacktestEngine:
         Ejecuta el backtest para un par y estrategia dados.
 
         Args:
-            symbol: Par de trading (ej: "BTC/USDT")
+            symbol: Par de trading (ej: "BTC/USDC")
             df: DataFrame OHLCV
             strategy: Instancia de estrategia
             timeframe: Timeframe del DataFrame

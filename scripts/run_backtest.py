@@ -50,7 +50,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Motor de Backtesting — Sistema de Trading Algorítmico"
     )
-    parser.add_argument("--symbol", default="BTC/USDT", help="Par a analizar")
+    parser.add_argument("--symbol", default="BTC/USDC", help="Par a analizar")
     parser.add_argument("--all-pairs", action="store_true", help="Backtest en todos los pares")
     parser.add_argument("--priority1", action="store_true", help="Solo pares Prioridad 1 (BTC+ETH)")
     parser.add_argument(

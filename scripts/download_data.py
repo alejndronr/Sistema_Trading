@@ -27,7 +27,7 @@ def main():
         description="Descarga datos OHLCV históricos de Binance para el backtesting"
     )
     parser.add_argument(
-        "--pairs", nargs="+", default=["BTC/USDT", "ETH/USDT"],
+        "--pairs", nargs="+", default=["BTC/USDC", "ETH/USDC"],
         help="Pares a descargar (ej: BTC/USDT ETH/USDT)"
     )
     parser.add_argument(

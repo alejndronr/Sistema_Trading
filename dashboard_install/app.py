@@ -149,17 +149,17 @@ def ensure_manual_tables():
 # ── Precios en vivo (CoinGecko, sin API key) ──────────────────────────────────
 
 COINGECKO_IDS = {
-    "BTC/USDT": "bitcoin",
-    "ETH/USDT": "ethereum",
-    "SOL/USDT": "solana",
-    "BNB/USDT": "binancecoin",
-    "XRP/USDT": "ripple",
-    "ADA/USDT": "cardano",
-    "AVAX/USDT": "avalanche-2",
-    "DOGE/USDT": "dogecoin",
-    "DOT/USDT": "polkadot",
-    "MATIC/USDT": "matic-network",
-    "LINK/USDT": "chainlink",
+    "BTC/USDC": "bitcoin",
+    "ETH/USDC": "ethereum",
+    "SOL/USDC": "solana",
+    "BNB/USDC": "binancecoin",
+    "XRP/USDC": "ripple",
+    "ADA/USDC": "cardano",
+    "AVAX/USDC": "avalanche-2",
+    "DOGE/USDC": "dogecoin",
+    "DOT/USDC": "polkadot",
+    "MATIC/USDC": "matic-network",
+    "LINK/USDC": "chainlink",
 }
 
 
@@ -473,7 +473,7 @@ def build_fiscal_dataframe(bot_trades: pd.DataFrame, manual_open: pd.DataFrame,
         for _, t in closed_bot.iterrows():
             rows.append({
                 "fecha":       pd.to_datetime(t["entry_time"]).date(),
-                "activo":      str(t["symbol"]).replace("/USDT", ""),
+                "activo":      str(t["symbol"]).replace("/USDC", ""),
                 "tipo":        "BUY",
                 "fuente":      "Bot",
                 "cantidad":    float(t["position_size"] or 0),
@@ -486,7 +486,7 @@ def build_fiscal_dataframe(bot_trades: pd.DataFrame, manual_open: pd.DataFrame,
             })
             rows.append({
                 "fecha":       pd.to_datetime(t["exit_time"]).date(),
-                "activo":      str(t["symbol"]).replace("/USDT", ""),
+                "activo":      str(t["symbol"]).replace("/USDC", ""),
                 "tipo":        "SELL",
                 "fuente":      "Bot",
                 "cantidad":    float(t["position_size"] or 0),
@@ -503,7 +503,7 @@ def build_fiscal_dataframe(bot_trades: pd.DataFrame, manual_open: pd.DataFrame,
         for _, t in manual_open.iterrows():
             rows.append({
                 "fecha":       t["buy_date"],
-                "activo":      str(t["symbol"]).replace("/USDT", ""),
+                "activo":      str(t["symbol"]).replace("/USDC", ""),
                 "tipo":        str(t.get("tx_type", "buy")).upper(),
                 "fuente":      "Manual",
                 "cantidad":    float(t["amount"]),
@@ -520,7 +520,7 @@ def build_fiscal_dataframe(bot_trades: pd.DataFrame, manual_open: pd.DataFrame,
         for _, t in manual_closed.iterrows():
             rows.append({
                 "fecha":       t["sell_date"],
-                "activo":      str(t["symbol"]).replace("/USDT", ""),
+                "activo":      str(t["symbol"]).replace("/USDC", ""),
                 "tipo":        "SELL",
                 "fuente":      "Manual",
                 "cantidad":    float(t["amount_sold"]),
@@ -745,7 +745,7 @@ with tab_overview:
     watched_symbols = list({
         *[str(p["symbol"]) for p in open_pos.to_dict("records") if "symbol" in p],
         *[str(t["symbol"]) for t in manual_open.to_dict("records") if "symbol" in t],
-        "BTC/USDT", "ETH/USDT", "SOL/USDT",
+        "BTC/USDC", "ETH/USDC", "SOL/USDC",
     })
     prices = fetch_live_prices(tuple(watched_symbols))
 
@@ -812,7 +812,7 @@ with tab_overview:
             chg    = pdata["change_24h"]
             chg_color = "#1D9E75" if chg >= 0 else "#E24B4A"
             sign   = "▲" if chg >= 0 else "▼"
-            ticker = sym.replace("/USDT", "")
+            ticker = sym.replace("/USDC", "")
             st.markdown(
                 f"**{ticker}** &nbsp; "
                 f"<span class='mono'>${price:,.4f}</span> &nbsp; "
@@ -850,7 +850,7 @@ with tab_portfolio:
     all_symbols = list({
         *[str(r["symbol"]) for _, r in manual_open.iterrows()],
         *[str(r["symbol"]) for _, r in open_pos.iterrows()],
-        "BTC/USDT", "ETH/USDT",
+        "BTC/USDC", "ETH/USDC",
     })
     prices = fetch_live_prices(tuple(all_symbols))
 
@@ -865,7 +865,7 @@ with tab_portfolio:
         pnl  = val - cost
         pct  = (pnl / cost * 100) if cost > 0 else 0
         portfolio_rows.append({
-            "Activo": sym.replace("/USDT", ""),
+            "Activo": sym.replace("/USDC", ""),
             "Tipo":   "🤖 Bot",
             "Unidades": f"{float(p['units']):.6f}",
             "Precio compra": f"${float(p['entry_price']):,.4f}",
@@ -886,7 +886,7 @@ with tab_portfolio:
         pnl  = val - cost
         pct  = (pnl / cost * 100) if cost > 0 else 0
         portfolio_rows.append({
-            "Activo":        sym.replace("/USDT", ""),
+            "Activo":        sym.replace("/USDC", ""),
             "Tipo":          "👤 Manual",
             "Unidades":      f"{float(t['amount']):.6f}",
             "Precio compra": f"${float(t['buy_price']):,.4f}",
@@ -1155,7 +1155,7 @@ with tab_manual:
                 pct = (pnl / (float(t["amount"]) * float(t["buy_price"])) * 100) if float(t["buy_price"]) > 0 else 0
                 rows_m.append({
                     "ID":         int(t["id"]),
-                    "Activo":     sym.replace("/USDT", ""),
+                    "Activo":     sym.replace("/USDC", ""),
                     "Cantidad":   float(t["amount"]),
                     "Compra":     f"${float(t['buy_price']):,.4f}",
                     "Actual":     f"${cur:,.4f}",

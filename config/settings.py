@@ -112,16 +112,16 @@ class AssetConfig:
 
 ASSETS: Dict[str, AssetConfig] = {
     # Prioridad 1 — Alta liquidez
-    "BTC/USDT": AssetConfig("BTC/USDT", AssetPriority.HIGH, 0.001, 100_000_000),
-    "ETH/USDT": AssetConfig("ETH/USDT", AssetPriority.HIGH, 0.001, 100_000_000),
+    "BTC/USDC": AssetConfig("BTC/USDC", AssetPriority.HIGH, 0.001, 100_000_000),
+    "ETH/USDC": AssetConfig("ETH/USDC", AssetPriority.HIGH, 0.001, 100_000_000),
     # Prioridad 2 — Volatilidad media
-    "SOL/USDT": AssetConfig("SOL/USDT", AssetPriority.MEDIUM, 0.002, 50_000_000),
-    "BNB/USDT": AssetConfig("BNB/USDT", AssetPriority.MEDIUM, 0.002, 50_000_000),
-    "AVAX/USDT": AssetConfig("AVAX/USDT", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "SOL/USDC": AssetConfig("SOL/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "BNB/USDC": AssetConfig("BNB/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "AVAX/USDC": AssetConfig("AVAX/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
     # Prioridad 3 — Solo en tendencia fuerte
-    "LINK/USDT": AssetConfig("LINK/USDT", AssetPriority.LOW, 0.002, 50_000_000),
-    "DOT/USDT": AssetConfig("DOT/USDT", AssetPriority.LOW, 0.002, 50_000_000),
-    "MATIC/USDT": AssetConfig("MATIC/USDT", AssetPriority.LOW, 0.002, 50_000_000),
+    "LINK/USDC": AssetConfig("LINK/USDC", AssetPriority.LOW, 0.002, 50_000_000),
+    "DOT/USDC": AssetConfig("DOT/USDC", AssetPriority.LOW, 0.002, 50_000_000),
+    "MATIC/USDC": AssetConfig("MATIC/USDC", AssetPriority.LOW, 0.002, 50_000_000),
 }
 
 # Pares ordenados por prioridad (para el backtest)

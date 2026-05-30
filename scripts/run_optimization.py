@@ -16,7 +16,7 @@ def main():
     logger = get_logger(__name__)
     
     parser = argparse.ArgumentParser(description="Hyperparameter Optimizer - Motor de Búsqueda de Alfa")
-    parser.add_argument("--symbol", type=str, default="BTC/USDT", help="Par a optimizar")
+    parser.add_argument("--symbol", type=str, default="BTC/USDC", help="Par a optimizar")
     args = parser.parse_args()
 
     logger.info("Iniciando Optimización V4", symbol=args.symbol)

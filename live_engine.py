@@ -80,12 +80,12 @@ ENGINE_VERSION = "4.0.0-Adaptive"
 
 # Universe de pares — ordenados por liquidez/prioridad
 SYMBOLS: List[str] = [
-    "BTC/USDT",   # tier-1: mayor liquidez, menor spread
-    "ETH/USDT",   # tier-1
-    "SOL/USDT",   # tier-2: buena volatilidad, suficiente volumen
-    "BNB/USDT",   # tier-2
-    "LINK/USDT",  # tier-2: buena tendencia
-    "AVAX/USDT",  # tier-3: mayor volatilidad = más oportunidades
+    "BTC/USDC",   # tier-1: mayor liquidez, menor spread
+    "ETH/USDC",   # tier-1
+    "SOL/USDC",   # tier-2: buena volatilidad, suficiente volumen
+    "BNB/USDC",   # tier-2
+    "LINK/USDC",  # tier-2: buena tendencia
+    "AVAX/USDC",  # tier-3: mayor volatilidad = más oportunidades
 ]
 
 # Timeframes: estructura en 1h, entrada en 15m
@@ -1501,14 +1501,16 @@ class LiveEngine:
                     INSERT INTO trades_journal
                         (trade_id, strategy, symbol, timeframe, direction,
                          setup_quality, entry_price, stop_loss,
-                         take_profit_1, take_profit_2, position_size,
-                         risk_amount, entry_reason, market_regime,
-                         ml_probability, entry_time, is_backtest)
+                         tp1, tp2, take_profit_1,
+                         units, position_size,
+                         risk_amount, entry_reason, market_regime, regime,
+                         ml_proba, entry_time, is_backtest)
                     VALUES
                         (:tid, :strat, :sym, :tf, :dir,
                          :qual, :ep, :sl,
-                         :tp1, :tp2, :size,
-                         :risk, :reason, :regime,
+                         :tp1, :tp2, :tp1,
+                         :size, :size,
+                         :risk, :reason, :regime, :regime,
                          :ml, NOW(), FALSE)
                     ON CONFLICT DO NOTHING
                 """), {
@@ -1517,7 +1519,7 @@ class LiveEngine:
                     "sym":    signal.symbol,
                     "tf":     TF_ENTRY,
                     "dir":    signal.direction,
-                    "qual":   signal.quality,
+                    "qual":   ord(signal.quality[0]) - 64 if signal.quality else 0,
                     "ep":     signal.entry_price,
                     "sl":     signal.stop_loss,
                     "tp1":    signal.tp1,
