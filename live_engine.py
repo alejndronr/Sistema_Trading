@@ -126,6 +126,31 @@ COOLDOWN_AFTER_SL_MIN = 90
 # Score mínimo para entrar — INTENCIONAL: 55/100, no 80/100
 MIN_SIGNAL_SCORE = 55
 
+# Score mínimo específico para MeanReversion (más exigente por riesgo de correlación)
+MIN_SCORE_MEAN_REVERSION = 65
+
+# Correlación de cartera: máximo activos de alta correlación simultáneos
+# BTC, ETH, SOL, BNB, LINK, AVAX tienen correlación > 0.75 entre sí
+# Permitir solo 1 posición abierta en altcoins correlacionadas al mismo tiempo
+MAX_CORRELATED_POSITIONS = 1
+
+# Grupos de correlación alta (no abrir más de MAX_CORRELATED_POSITIONS del mismo grupo)
+CORRELATION_GROUPS: Dict[str, str] = {
+    "BTC/USDC": "btc",          # BTC es su propio grupo (menos correlado)
+    "ETH/USDC": "altcoin",      # Las altcoins van juntas
+    "SOL/USDC": "altcoin",
+    "BNB/USDC": "altcoin",
+    "LINK/USDC": "altcoin",
+    "AVAX/USDC": "altcoin",
+}
+
+# Horario permitido para MeanReversion (UTC): solo sesión asiática (baja volatilidad)
+# Evita que MR entre durante London/NY overlap donde los movimientos son más direccionales
+MR_ALLOWED_HOURS_UTC: range = range(0, 8)   # 00:00–07:59 UTC = sesión asiática
+
+# Multiplicador ATR para SL de MeanReversion (más holgado para evitar stops prematuros)
+MR_ATR_STOP_MULTIPLIER: float = 2.5  # antes era 2.0 implícito
+
 # Peso Kelly fraccionado (Kelly/4 = ultra-conservador)
 KELLY_FRACTION = 0.25
 
@@ -619,13 +644,14 @@ def strategy_mean_reversion(df: pd.DataFrame, regime: MarketRegime) -> Optional[
         score += 10
         reasons.append("VFI_bull_at_extreme")
 
-    if score < MIN_SIGNAL_SCORE:
+    # MeanReversion usa umbral más exigente que otras estrategias
+    if score < MIN_SCORE_MEAN_REVERSION:
         return None
 
     # ── Niveles ────────────────────────────────────────────────────────────
     atr       = float(last.get("atr", c * 0.015))
-    # SL: 2 ATR bajo BB lower (espacio para respirar)
-    stop_loss = max(bb_lower - 2.0 * atr, c * 0.970)
+    # SL: 2.5 ATR (más holgado para evitar stops prematuros en correcciones)
+    stop_loss = max(bb_lower - MR_ATR_STOP_MULTIPLIER * atr, c * 0.965)
 
     dist_sl = c - stop_loss
     if dist_sl <= 0:
@@ -919,12 +945,15 @@ def compute_position_size(
     capital:   float,
     open_count: int,
     daily_pnl_pct: float,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     """
     Calcula el tamaño de posición con Kelly fraccionado + límites de riesgo.
 
     Returns:
-        (units, risk_amount_usd)
+        (units, risk_amount_usd, notional_usd)
+        - units:          unidades del activo a comprar
+        - risk_amount_usd: capital en riesgo (distancia al SL × units)
+        - notional_usd:   capital total invertido (units × entry_price)
     """
     # ── Riesgo base por capital ────────────────────────────────────────────
     if capital < 1500:
@@ -969,7 +998,7 @@ def compute_position_size(
     # ── Unidades ───────────────────────────────────────────────────────────
     dist_sl = signal.entry_price - signal.stop_loss
     if dist_sl <= 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
     units = risk_usd / dist_sl
 
@@ -979,10 +1008,11 @@ def compute_position_size(
         units = max_notional / signal.entry_price
 
     # Validar mínimo Binance (~$11)
-    if units * signal.entry_price < 11.0:
-        return 0.0, 0.0
+    notional_usd = units * signal.entry_price
+    if notional_usd < 11.0:
+        return 0.0, 0.0, 0.0
 
-    return units, risk_usd
+    return units, risk_usd, notional_usd
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1260,6 +1290,39 @@ class LiveEngine:
             log.debug("max_positions_reached", n=len(open_positions))
             return
 
+        # ── Filtro de correlación de cartera ───────────────────────────────
+        # Evita abrir múltiples altcoins correlacionadas al mismo tiempo
+        # (el evento del 29 mayo: 3 stops simultáneos en AVAX+LINK+BTC)
+        my_group = CORRELATION_GROUPS.get(symbol, "other")
+        if my_group != "btc":  # BTC es menos correlado, solo filtrar altcoins
+            group_count = sum(
+                1 for p in open_positions
+                if CORRELATION_GROUPS.get(p.get("symbol", ""), "other") == my_group
+            )
+            if group_count >= MAX_CORRELATED_POSITIONS:
+                log.info(
+                    "correlation_filter_skip",
+                    symbol=symbol,
+                    group=my_group,
+                    open_in_group=group_count,
+                    max=MAX_CORRELATED_POSITIONS,
+                )
+                return
+
+        # ── Filtro horario para MeanReversion ─────────────────────────────
+        # MR funciona mejor en sesión asiática (baja volatilidad)
+        # En London/NY los movimientos son más direccionales y rompen la reversión
+        if "MeanReversion" in signal.strategy:
+            current_hour_utc = datetime.now(timezone.utc).hour
+            if current_hour_utc not in MR_ALLOWED_HOURS_UTC:
+                log.info(
+                    "mr_session_filter_skip",
+                    symbol=symbol,
+                    hour_utc=current_hour_utc,
+                    allowed=f"00-07 UTC",
+                )
+                return
+
         # Cooldown por símbolo
         cooldown = self._cooldowns.get(symbol, SymbolCooldown())
         elapsed  = time.time() - cooldown.last_sl_time
@@ -1330,10 +1393,15 @@ class LiveEngine:
         # Actualizar entry_price al precio actual 15m (más preciso)
         signal.entry_price = c_15m
 
-        units, risk_usd = compute_position_size(signal, capital, len(open_positions), pnl_pct)
+        units, risk_usd, notional_usd = compute_position_size(
+            signal, capital, len(open_positions), pnl_pct
+        )
         if units <= 0:
             log.warning("position_size_zero", symbol=symbol)
             return
+
+        # Calcular % del capital que representa esta posición
+        capital_pct = (notional_usd / capital * 100) if capital > 0 else 0
 
         # ── Ejecutar entrada ───────────────────────────────────────────────
         log.info(
@@ -1341,7 +1409,12 @@ class LiveEngine:
             symbol=symbol, strategy=signal.strategy,
             score=f"{signal.score:.0f}", quality=signal.quality,
             entry=f"${c_15m:.4f}", sl=f"${signal.stop_loss:.4f}",
-            tp1=f"${signal.tp1:.4f}", risk=f"${risk_usd:.2f}",
+            tp1=f"${signal.tp1:.4f}",
+            # Capital tracking — visible en logs y dashboard
+            risk_usd=f"${risk_usd:.2f}",
+            notional_usd=f"${notional_usd:.2f}",
+            capital_pct=f"{capital_pct:.1f}%",
+            capital_total=f"${capital:.2f}",
             regime=signal.regime.regime, ml=f"{signal.ml_proba:.0%}",
             reasons=",".join(signal.reasons[:3]),
         )
@@ -1357,13 +1430,19 @@ class LiveEngine:
             ml_proba=signal.ml_proba,
             direction=signal.direction,
             regime=signal.regime.regime,
+            risk_amount=risk_usd,
+            notional_usd=notional_usd,
         )
 
         if self._bot:
             await self._bot.send_trade_open(trade)
 
-        # Registrar en journal con calidad y razones
-        await self._log_trade_extended(trade, signal)
+        # Registrar en journal con calidad, razones y capital invertido
+        await self._log_trade_extended(
+            trade, signal,
+            notional_usd=notional_usd,
+            capital_at_entry=capital,
+        )
 
         # Limpiar señal usada
         self._pending_signals.pop(symbol, None)
@@ -1491,12 +1570,22 @@ class LiveEngine:
         except Exception:
             pass
 
-    async def _log_trade_extended(self, trade: Dict, signal: SignalResult) -> None:
+    async def _log_trade_extended(
+        self,
+        trade:       Dict,
+        signal:      SignalResult,
+        notional_usd: float = 0.0,
+        capital_at_entry: float = 0.0,
+    ) -> None:
         """Registra el trade en trades_journal con campos extendidos de V4."""
         if not self._portfolio or not self._portfolio._engine:
             return
         try:
             async with self._portfolio._session_factory() as sess:
+                capital_pct_entry = (
+                    notional_usd / capital_at_entry * 100
+                    if capital_at_entry > 0 else 0
+                )
                 await sess.execute(text("""
                     INSERT INTO trades_journal
                         (trade_id, strategy, symbol, timeframe, direction,
@@ -1504,14 +1593,16 @@ class LiveEngine:
                          tp1, tp2, take_profit_1,
                          units, position_size,
                          risk_amount, entry_reason, market_regime, regime,
-                         ml_proba, entry_time, is_backtest)
+                         ml_proba, entry_time, is_backtest,
+                         observations)
                     VALUES
                         (:tid, :strat, :sym, :tf, :dir,
                          :qual, :ep, :sl,
                          :tp1, :tp2, :tp1,
                          :size, :size,
                          :risk, :reason, :regime, :regime,
-                         :ml, NOW(), FALSE)
+                         :ml, NOW(), FALSE,
+                         :obs)
                     ON CONFLICT DO NOTHING
                 """), {
                     "tid":    trade.get("id", 0),
@@ -1529,6 +1620,13 @@ class LiveEngine:
                     "reason": " | ".join(signal.reasons[:5]),
                     "regime": signal.regime.regime,
                     "ml":     signal.ml_proba,
+                    "obs":    (
+                        f"notional=${notional_usd:.2f} "
+                        f"capital_pct={capital_pct_entry:.1f}% "
+                        f"capital_at_entry=${capital_at_entry:.2f} "
+                        f"score={signal.score:.0f} "
+                        f"quality={signal.quality}"
+                    ),
                 })
                 await sess.commit()
         except Exception as exc:

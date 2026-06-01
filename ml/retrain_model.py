@@ -257,23 +257,34 @@ def load_trades(engine, since: datetime) -> pd.DataFrame:
 
 
 def load_ohlcv_from_db(engine, symbol: str, since: datetime) -> pd.DataFrame:
-    """Carga OHLCV del timeframe de entrenamiento desde PostgreSQL."""
+    """
+    Carga OHLCV del timeframe de entrenamiento desde PostgreSQL.
+    La columna timestamp es bigint (milisegundos Unix) — se convierte antes de comparar.
+    """
+    # Convertir datetime → milisegundos Unix (tipo de la columna en BD)
+    since_ms = int(since.timestamp() * 1000)
+
     query = text("""
         SELECT timestamp, open, high, low, close, volume
         FROM ohlcv
         WHERE symbol    = :sym
           AND timeframe = :tf
-          AND timestamp >= :since
+          AND timestamp >= :since_ms
         ORDER BY timestamp ASC
     """)
     with engine.connect() as conn:
         df = pd.DataFrame(
-            conn.execute(query, {"sym": symbol, "tf": TRAIN_TIMEFRAME, "since": since}).fetchall(),
+            conn.execute(query, {
+                "sym":      symbol,
+                "tf":       TRAIN_TIMEFRAME,
+                "since_ms": since_ms,
+            }).fetchall(),
             columns=["timestamp", "open", "high", "low", "close", "volume"],
         )
 
     if not df.empty:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        # Convertir bigint ms → datetime UTC
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     return df
 
 

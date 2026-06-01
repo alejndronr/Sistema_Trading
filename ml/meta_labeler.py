@@ -89,11 +89,26 @@ class MetaLabeler:
         price = df["close"].values.astype(float)
         n = len(price)
 
-        def col(name: str, default: float = 0.0) -> np.ndarray:
-            """Extrae columna con default seguro."""
+        def col(name: str, default=0.0) -> np.ndarray:
+            """
+            Extrae columna con default seguro.
+            pandas 3.x: fillna() no acepta arrays numpy, solo escalares.
+            Si default es array (ej. price * 0.015), lo manejamos manualmente.
+            """
             if name in df.columns:
-                return df[name].fillna(default).values.astype(float)
-            return np.full(n, default, dtype=float)
+                arr = df[name].values.astype(float)
+                if isinstance(default, np.ndarray):
+                    # Reemplazar NaN con el array de defaults
+                    nan_mask = np.isnan(arr)
+                    arr[nan_mask] = default[nan_mask]
+                    return arr
+                else:
+                    # Escalar: fillna seguro
+                    return df[name].fillna(float(default)).values.astype(float)
+            # Columna no existe
+            if isinstance(default, np.ndarray):
+                return default.astype(float)
+            return np.full(n, float(default), dtype=float)
 
         rsi = col("rsi", 50.0)
         adx = col("adx", 20.0)
@@ -107,7 +122,11 @@ class MetaLabeler:
         ema55_col = "ema_55" if "ema_55" in df.columns else "ema55"
         ema55 = col(ema55_col, price)
         
-        macd_h = col("macd_histogram", col("macd_hist", 0.0))
+        # pandas 3.x: no anidar col() — resolver en dos pasos
+        if "macd_histogram" in df.columns:
+            macd_h = col("macd_histogram", 0.0)
+        else:
+            macd_h = col("macd_hist", 0.0)
         bb_up = col("bb_upper", price * 1.02)
         bb_lo = col("bb_lower", price * 0.98)
         bb_mid = col("bb_mid", price)
@@ -122,7 +141,9 @@ class MetaLabeler:
             "HIGH_VOL": -0.5, "high_volatility": -0.5,
             "BEAR_TREND": -1.0, "BEAR": -1.0, "bearish": -1.0
         }
-        regime = regime_raw.map(regime_map).fillna(0.0).values.astype(float)
+        regime_mapped = regime_raw.map(regime_map)
+        # fillna con escalar explícito (pandas 3.x compatible)
+        regime = regime_mapped.fillna(0.0).values.astype(float)
         consensus = col("consensus", 50.0)
 
         # Volume moving average (vectorizado)

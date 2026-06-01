@@ -64,6 +64,7 @@ GATE = {
 }
 
 PRICE_CACHE_TTL = 30   # segundos entre llamadas a Binance
+MAX_OPEN_DISPLAY = 3   # máximo de posiciones simultáneas del motor V4
 PRICE_CACHE_KEY = "_price_cache"
 PRICE_TIME_KEY  = "_price_time"
 
@@ -306,19 +307,31 @@ def global_metrics() -> Dict[str, Any]:
     Query de agregación SQL: no carga filas en memoria, no afectado por LIMIT.
     """
     df = qry("""
+        WITH trades_agrupados AS (
+            SELECT
+                symbol,
+                DATE_TRUNC('minute', entry_time) AS entry_minute,
+                SUM(COALESCE(pnl, pnl_usd))      AS pnl_total,
+                MAX(ABS(COALESCE(r_multiple, 0))) AS r_abs,
+                BOOL_OR(COALESCE(pnl, pnl_usd) > 0) AS es_ganador,
+                MAX(exit_time)                   AS last_exit
+            FROM trades_journal
+            WHERE exit_time IS NOT NULL
+            GROUP BY symbol, DATE_TRUNC('minute', entry_time)
+        )
         SELECT
-            COUNT(*)                                                      AS total,
-            SUM(CASE WHEN COALESCE(pnl, pnl_usd) > 0 THEN 1 ELSE 0 END) AS wins,
-            COALESCE(SUM(CASE WHEN COALESCE(pnl, pnl_usd) > 0
-                THEN COALESCE(pnl, pnl_usd) ELSE 0 END), 0)              AS gross_win,
-            COALESCE(ABS(SUM(CASE WHEN COALESCE(pnl, pnl_usd) <= 0
-                THEN COALESCE(pnl, pnl_usd) ELSE 0 END)), 0)             AS gross_loss,
-            COALESCE(SUM(COALESCE(pnl, pnl_usd)), 0)                     AS total_pnl,
-            COALESCE(MAX(COALESCE(pnl, pnl_usd)), 0)                     AS best,
-            COALESCE(MIN(COALESCE(pnl, pnl_usd)), 0)                     AS worst,
-            COALESCE(AVG(r_multiple), 0)                                  AS avg_r
-        FROM trades_journal
-        WHERE exit_time IS NOT NULL
+            COUNT(*)                                               AS total,
+            SUM(CASE WHEN es_ganador THEN 1 ELSE 0 END)           AS wins,
+            COALESCE(SUM(CASE WHEN pnl_total > 0
+                THEN pnl_total ELSE 0 END), 0)                    AS gross_win,
+            COALESCE(ABS(SUM(CASE WHEN pnl_total <= 0
+                THEN pnl_total ELSE 0 END)), 0)                   AS gross_loss,
+            COALESCE(SUM(pnl_total), 0)                           AS total_pnl,
+            COALESCE(MAX(pnl_total), 0)                           AS best,
+            COALESCE(MIN(pnl_total), 0)                           AS worst,
+            COALESCE(AVG(CASE WHEN es_ganador THEN r_abs
+                ELSE -r_abs END), 0)                              AS avg_r
+        FROM trades_agrupados
     """)
     if df.empty:
         return dict(total=0, win_rate=0.0, profit_factor=0.0,
@@ -460,10 +473,15 @@ with t1:
                 "#EF9F27" if src_label == "coingecko" else "#999")
 
     c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.metric("Capital Bot",     f"${capital:,.2f}",
-              delta=fmt_usd(capital - INITIAL_CAPITAL))
-    c2.metric("PnL Total",       fmt_usd(m["total_pnl"]),
-              delta=fmt_pct(m["total_pnl"]/INITIAL_CAPITAL*100) if INITIAL_CAPITAL else "—")
+    _delta_capital = capital - INITIAL_CAPITAL
+    # delta numérico → Streamlit colorea verde si >0, rojo si <0 automáticamente
+    c1.metric("Capital Bot",
+              value=f"${capital:,.2f}",
+              delta=round(_delta_capital, 2))
+    _delta_pnl = m["total_pnl"]
+    c2.metric("PnL Total",
+              value=f"${_delta_pnl:,.2f}",
+              delta=round(_delta_pnl / INITIAL_CAPITAL * 100, 2) if INITIAL_CAPITAL else 0)
     c3.metric("Win Rate",        f"{m['win_rate']:.1f}%",
               delta="✓ ≥45%" if m["win_rate"] >= 45 else "✗ <45%")
     c4.metric("Profit Factor",   f"{m['profit_factor']:.2f}",
@@ -479,10 +497,13 @@ with t1:
     with col_l:
         # Curva de capital (últimas 500 velas cerradas para el gráfico)
         df_equity = qry("""
-            SELECT exit_time, COALESCE(pnl, pnl_usd) AS pnl
+            SELECT
+                MAX(exit_time)             AS exit_time,
+                SUM(COALESCE(pnl, pnl_usd)) AS pnl
             FROM trades_journal
             WHERE exit_time IS NOT NULL
-            ORDER BY exit_time ASC
+            GROUP BY symbol, DATE_TRUNC('minute', entry_time)
+            ORDER BY MAX(exit_time) ASC
             LIMIT 500
         """)
 
@@ -556,7 +577,10 @@ with t1:
     # Posiciones abiertas del bot
     df_open = qry("""
         SELECT symbol, strategy, direction, entry_time, entry_price,
-               stop_loss, tp1, tp2, units, risk_amount, ml_proba
+               stop_loss, tp1, tp2,
+               units, remaining_units,
+               risk_amount, tp1_hit,
+               ml_proba
         FROM positions WHERE status='open' ORDER BY entry_time DESC
     """)
     st.subheader(f"🤖 Posiciones abiertas del bot ({len(df_open)})")
@@ -570,17 +594,28 @@ with t1:
             sym  = str(p["symbol"])
             cur  = prices.get(sym, {}).get("price", float(p["entry_price"]))
             unreal = float(p["units"]) * (cur - float(p["entry_price"]))
+            notional_pos  = float(p["units"]) * float(p["entry_price"])
+            cap_pct_pos   = notional_pos / capital * 100 if capital > 0 else 0
+            rem_units     = float(p.get("remaining_units") or p["units"])
+            unreal_remain = rem_units * (cur - float(p["entry_price"]))
             rows_o.append({
-                "Par":           sym,
-                "Estrategia":    p.get("strategy","—"),
-                "Entrada":       f"${float(p['entry_price']):,.4f}",
-                "Actual":        f"${cur:,.4f}",
-                "SL":            f"${float(p['stop_loss']):,.4f}" if p.get("stop_loss") else "—",
-                "TP1":           f"${float(p['tp1']):,.4f}"       if p.get("tp1")       else "—",
-                "Unidades":      round(float(p["units"]), 6),
-                "PnL no real.":  round(unreal, 2),
-                "ML proba":      f"{float(p['ml_proba']):.0%}" if p.get("ml_proba") else "—",
-                "Apertura (MAD)":str(p["entry_time"]),
+                "Par":            sym,
+                "Estrategia":     p.get("strategy","—"),
+                "Dirección":      str(p.get("direction","long")).upper(),
+                "Entrada":        f"${float(p['entry_price']):,.4f}",
+                "Actual":         f"${cur:,.4f}",
+                "SL":             f"${float(p['stop_loss']):,.4f}",
+                "TP1":            f"${float(p['tp1']):,.4f}",
+                "TP2":            f"${float(p['tp2']):,.4f}",
+                "TP1 hit":        "✅" if p.get("tp1_hit") else "⬜",
+                "Unidades":       round(float(p["units"]), 6),
+                "Unid. restantes":round(rem_units, 6),
+                "Capital inv.":   f"${notional_pos:,.2f}",
+                "% capital":      f"{cap_pct_pos:.1f}%",
+                "Riesgo USD":     f"${float(p['risk_amount']):,.2f}",
+                "PnL no real.":   round(unreal_remain, 2),
+                "ML proba":       f"{float(p['ml_proba']):.0%}" if p.get("ml_proba") else "—",
+                "Apertura (MAD)": str(p["entry_time"]),
             })
         df_od = pd.DataFrame(rows_o)
         def _cpnl(v):
@@ -593,6 +628,32 @@ with t1:
             df_od.style.map(_cpnl, subset=["PnL no real."]),
             width='stretch', hide_index=True,
         )
+
+    # ── Resumen de exposición de capital ─────────────────────────────────
+    if not df_open.empty and rows_o:
+        df_exp = pd.DataFrame(rows_o)
+        total_notional = sum(
+            float(str(r).replace("$","").replace(",",""))
+            for r in df_exp["Capital inv."]
+        )
+        total_risk = sum(
+            float(str(r).replace("$","").replace(",",""))
+            for r in df_exp["Riesgo USD"]
+        )
+        pct_exposed = total_notional / capital * 100 if capital > 0 else 0
+
+        st.markdown("**Exposición de capital**")
+        ex1, ex2, ex3, ex4 = st.columns(4)
+        ex1.metric("Capital en posiciones", f"${total_notional:,.2f}",
+                   delta=f"{pct_exposed:.1f}% del total")
+        ex2.metric("Capital libre",
+                   f"${max(0, capital - total_notional):,.2f}",
+                   delta=f"{max(0, 100 - pct_exposed):.1f}% disponible")
+        ex3.metric("Riesgo total expuesto", f"${total_risk:,.2f}",
+                   delta=f"{total_risk/capital*100:.1f}% del capital" if capital > 0 else "—",
+                   delta_color="inverse")
+        ex4.metric("Posiciones abiertas", f"{len(df_open)}/{MAX_OPEN_DISPLAY}")
+        st.divider()
 
     # Actividad reciente
     df_recent = qry("""
@@ -619,7 +680,7 @@ with t1:
 with t2:
     st.subheader("💼 Portafolio combinado: bot + manuales")
 
-    df_op2  = qry("SELECT symbol, strategy, entry_price, units FROM positions WHERE status='open'")
+    df_op2  = qry("SELECT symbol, strategy, direction, entry_price, units, risk_amount, tp1, tp2, remaining_units FROM positions WHERE status='open'")
     df_man2 = qry("SELECT symbol, amount, buy_price, exchange FROM manual_investments WHERE status='open'")
 
     all_syms = list({
@@ -745,16 +806,18 @@ with t3:
     # LIMIT 500 solo para la tabla visual
     df_j = qry(f"""
         SELECT id, symbol, strategy,
-               COALESCE(direction, '') AS direction,
+               COALESCE(direction,'') AS direction,
                entry_time, exit_time,
                entry_price, exit_price,
-               tp1, tp2, COALESCE(units, position_size) AS units,
-               COALESCE(pnl, pnl_usd) AS pnl,
+               tp1, tp2,
+               COALESCE(units, 0)             AS units,
+               COALESCE(pnl, pnl_usd)         AS pnl,
                pnl_pct, r_multiple, exit_reason,
                ml_proba,
                COALESCE(regime, market_regime) AS regime,
                commission_paid, setup_quality,
-               risk_amount, duration_hours, entry_reason
+               risk_amount, duration_hours,
+               entry_reason, observations
         FROM trades_journal
         WHERE {' AND '.join(where)}
         ORDER BY entry_time DESC
@@ -793,7 +856,8 @@ journalctl -u trading-engine -f | grep -E "signal_queued|trade_opening|score|reg
             "regime","ml_proba","setup_quality",
             "exit_reason","entry_reason",
             "risk_amount","duration_hours",
-            "commission_paid","entry_time","exit_time",
+            "commission_paid","observations",
+            "entry_time","exit_time",
         ] if c in df_j.columns]
 
         def _sj(v):
@@ -807,11 +871,14 @@ journalctl -u trading-engine -f | grep -E "signal_queued|trade_opening|score|reg
             width='stretch', hide_index=True, height=420,
         )
 
-        # Nota si hay más de 500
+        # Nota sobre tp1_partial
+        st.caption(
+            "ℹ️ Las métricas agrupan TP1 parcial + TP2 del mismo trade en un único resultado. "
+            "La tabla muestra todas las filas de la BD para trazabilidad completa."
+        )
         total_global = mg["total"]
         if total_global > 500:
-            st.caption(f"ℹ️ Mostrando 500 de {total_global} trades. "
-                       "Las métricas de arriba incluyen todos.")
+            st.caption(f"Mostrando 500 de {total_global} trades.")
 
         # Gráficos
         ga, gb = st.columns(2)
