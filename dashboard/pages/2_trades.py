@@ -64,7 +64,7 @@ if df.empty:
     st.stop()
 
 # Fecha
-if len(date_range) == 2:
+if len(date_range) == 2 and "entry_time" in df.columns:
     start, end = date_range
     entry_col = pd.to_datetime(df["entry_time"], utc=True)
     df = df[
