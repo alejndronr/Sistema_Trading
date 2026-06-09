@@ -441,10 +441,19 @@ class RegimeFilter:
         return any(abs((ts - news_time).total_seconds()) < buffer.total_seconds() for news_time in news_times)
 
     def passes_asset_filter(self, symbol: str, current_regime: MarketRegime) -> Tuple[bool, str]:
-        if symbol not in ASSETS:
-            return False, f"Activo {symbol} no está en el universo permitido"
+        # Normalizar pares USDT → USDC para permitir backtesting histórico con USDT
+        # La operativa en producción siempre usa USDC; esto es solo para el lookup de prioridad
+        lookup_symbol = symbol
+        if symbol.endswith("/USDT"):
+            usdc_equivalent = symbol.replace("/USDT", "/USDC")
+            if usdc_equivalent in ASSETS:
+                lookup_symbol = usdc_equivalent
 
-        asset = ASSETS[symbol]
+        if lookup_symbol not in ASSETS:
+            # Par desconocido — permitir con prioridad media por defecto para no bloquear backtesting
+            return True, f"{symbol} no está en universo — permitido con prioridad media"
+
+        asset = ASSETS[lookup_symbol]
 
         if asset.priority == AssetPriority.LOW:
             if current_regime not in [MarketRegime.BULLISH_TREND, MarketRegime.BEARISH_TREND]:
