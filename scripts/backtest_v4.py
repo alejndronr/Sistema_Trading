@@ -48,34 +48,61 @@ load_dotenv(PROJECT_ROOT / ".env")
 # En lugar de reimplementar, importamos las funciones del live_engine V4.
 # Si por algún motivo falla el import (cambios futuros), usamos fallback inline.
 
-try:
-    from live_engine import (
-        enrich_dataframe,
-        detect_regime,
-        strategy_trend_following,
-        strategy_mean_reversion,
-        strategy_breakout,
-        strategy_momentum_scalp,
-        select_best_signal,
-        compute_position_size,
-        SignalResult,
-        MarketRegime,
-        SYMBOLS,
-        MIN_SIGNAL_SCORE,
-        MIN_SCORE_MEAN_REVERSION,
-        MAX_CORRELATED_POSITIONS,
-        CORRELATION_GROUPS,
-        MR_ALLOWED_HOURS_UTC,
-        INITIAL_CAPITAL,
-        COMMISSION_RATE,
-        SLIPPAGE_ESTIMATE,
-    )
-    print("✅ Lógica V4 importada desde live_engine.py")
-    V4_IMPORT_OK = True
-except ImportError as e:
-    print(f"⚠️  No se pudo importar live_engine.py ({e})")
-    print("    Asegúrate de ejecutar desde /home/trading/sistema_trading/")
+# Intentar importar V5 primero, fallback a V4
+_engine_module = None
+for _mod_name in ["live_engine_v5", "live_engine"]:
+    try:
+        import importlib
+        _engine_module = importlib.import_module(_mod_name)
+        print(f"✅ Lógica importada desde {_mod_name}.py")
+        break
+    except ImportError:
+        continue
+
+if _engine_module is None:
+    print("✗ No se encontró live_engine_v5.py ni live_engine.py")
     sys.exit(1)
+
+# Importar símbolos desde el módulo encontrado
+enrich_dataframe  = _engine_module.enrich_dataframe
+detect_regime     = _engine_module.detect_regime
+select_best_signal= _engine_module.select_best_signal
+compute_position_size = _engine_module.compute_position_size
+SignalResult      = _engine_module.SignalResult
+MarketRegime      = _engine_module.MarketRegime
+SYMBOLS           = _engine_module.SYMBOLS
+INITIAL_CAPITAL   = _engine_module.INITIAL_CAPITAL
+COMMISSION_RATE   = _engine_module.COMMISSION_RATE
+SLIPPAGE_ESTIMATE = _engine_module.SLIPPAGE_ESTIMATE
+MAX_CORRELATED_POSITIONS = _engine_module.MAX_CORRELATED_POSITIONS
+CORRELATION_GROUPS       = _engine_module.CORRELATION_GROUPS
+MR_ALLOWED_HOURS_UTC     = _engine_module.MR_ALLOWED_HOURS_UTC
+
+# Estrategias (V5 si disponible, V4 como fallback)
+_strat_names = {
+    "trend":   ["strategy_trend_following_v5",   "strategy_trend_following"],
+    "mr":      ["strategy_mean_reversion_v5",    "strategy_mean_reversion"],
+    "breakout":["strategy_breakout_v5",          "strategy_breakout"],
+    "momentum":["strategy_momentum_scalp_v5",    "strategy_momentum_scalp"],
+}
+def _get_strat(names):
+    for n in names:
+        fn = getattr(_engine_module, n, None)
+        if fn is not None:
+            return fn
+    return None
+
+strategy_trend    = _get_strat(_strat_names["trend"])
+strategy_mr       = _get_strat(_strat_names["mr"])
+strategy_breakout = _get_strat(_strat_names["breakout"])
+strategy_momentum = _get_strat(_strat_names["momentum"])
+
+try:
+    MIN_SIGNAL_SCORE      = _engine_module.MIN_SIGNAL_SCORE
+    MIN_SCORE_MEAN_REVERSION = _engine_module.MIN_SCORE_MEAN_REVERSION
+except AttributeError:
+    MIN_SIGNAL_SCORE = 55
+    MIN_SCORE_MEAN_REVERSION = 65
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Config del backtester ──────────────────────────────────────────────────────
@@ -500,16 +527,16 @@ def run_backtest_v4(
             if not regime.is_tradeable:
                 continue
 
-            # Evaluar las 4 estrategias
+            # Evaluar las 4 estrategias (V5 si disponible, V4 como fallback)
             candidates = []
             if regime.regime in ("BULL", "RANGE", "HIGH_VOL"):
-                candidates.append(strategy_trend_following(window, regime))
-                candidates.append(strategy_mean_reversion(window, regime))
-                candidates.append(strategy_breakout(window, regime))
-                candidates.append(strategy_momentum_scalp(window, regime))
+                if strategy_trend:    candidates.append(strategy_trend(window, regime))
+                if strategy_mr:       candidates.append(strategy_mr(window, regime))
+                if strategy_breakout: candidates.append(strategy_breakout(window, regime))
+                if strategy_momentum: candidates.append(strategy_momentum(window, regime))
             elif regime.regime == "BEAR":
-                candidates.append(strategy_mean_reversion(window, regime))
-                candidates.append(strategy_trend_following(window, regime))
+                if strategy_mr:    candidates.append(strategy_mr(window, regime))
+                if strategy_trend: candidates.append(strategy_trend(window, regime))
 
             # Filtro horario MeanReversion
             valid = []

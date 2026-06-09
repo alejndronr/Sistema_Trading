@@ -1,15 +1,16 @@
 # /etc/systemd/system/trading-engine.service
 # ══════════════════════════════════════════════════════════════════════════════
 # Motor principal de Paper/Live Trading — ZimaBlade
+# Versión: V5.0.0-Omniscient
 #
-# Instalación (deploy.sh lo hace automáticamente):
-#   sudo cp systemd/trading-engine.service /etc/systemd/system/
+# Instalación:
+#   sudo cp trading-engine.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now trading-engine
+#   sudo systemctl restart trading-engine
 # ══════════════════════════════════════════════════════════════════════════════
 
 [Unit]
-Description=Crypto Trading Engine — Sistema de Trading ZimaBlade
+Description=Crypto Trading Engine V5 — Sistema de Trading ZimaBlade
 Documentation=file:///home/trading/sistema_trading/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -21,13 +22,12 @@ User=trading
 Group=trading
 WorkingDirectory=/home/trading/sistema_trading
 EnvironmentFile=/home/trading/sistema_trading/.env
-ExecStart=/home/trading/sistema_trading/venv/bin/python live_engine.py
+ExecStart=/home/trading/sistema_trading/venv/bin/python live_engine_v5.py
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # ── Reinicio automático ───────────────────────────────────────────────────────
 Restart=on-failure
 RestartSec=30
-# Máximo 5 reinicios en 10 minutos → si persiste el error, no hacer loop infinito
 StartLimitBurst=5
 StartLimitIntervalSec=600
 
@@ -45,7 +45,6 @@ SyslogIdentifier=trading-engine
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-# El proceso solo puede escribir en el directorio del proyecto
 ReadWritePaths=/home/trading/sistema_trading /tmp
 PrivateTmp=true
 
