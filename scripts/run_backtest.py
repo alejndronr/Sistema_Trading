@@ -27,9 +27,11 @@ from config.settings import ALL_PAIRS, PRIORITY_1_PAIRS, RISK
 
 def get_strategy(strategy_name: str, symbol: str, timeframe: str):
     """Factory de estrategias por nombre."""
-    from strategies.trend_following import TrendFollowingStrategy
-    from strategies.mean_reversion import MeanReversionStrategy
-    from strategies.breakout import BreakoutStrategy
+    from strategies.signals import (
+        TrendFollowingStrategy,
+        MeanReversionStrategy,
+        BreakoutStrategy,
+    )
 
     strategies = {
         "trend_following": TrendFollowingStrategy,
@@ -75,8 +77,7 @@ def main():
 
     from data.fetcher import DataFetcher
     from data.storage import OHLCVStorage
-    from backtesting.engine import BacktestEngine
-    from backtesting.report import BacktestReporter
+    from backtesting.engine import BacktestEngine, BacktestReporter
 
     # Determinar pares a analizar
     if args.all_pairs:

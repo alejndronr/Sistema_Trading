@@ -345,3 +345,17 @@ class DataFetcher:
 
     def __exit__(self, *args: object) -> None:
         self.close()
+
+
+def fetch_ohlcv(symbol: str, timeframe: str, since_days: int = 730) -> pd.DataFrame:
+    """Wrapper function to fetch OHLCV via DataFetcher."""
+    fetcher = DataFetcher()
+    return fetcher.fetch_ohlcv_sync(symbol, timeframe, since_days=since_days)
+
+
+def load_from_db(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    """Wrapper function to load OHLCV from local storage/db."""
+    from data.storage import OHLCVStorage
+    storage = OHLCVStorage()
+    return storage.load_ohlcv(symbol, timeframe)
+

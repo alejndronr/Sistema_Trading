@@ -44,12 +44,17 @@ Systemd timer sugerido: cada 2 semanas + trigger por nuevo batch de 50 trades
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import shutil
 import signal
 import sys
+
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
 import time
 import urllib.parse
 import urllib.request
@@ -83,7 +88,7 @@ log = structlog.get_logger(__name__)
 # ── Constantes ────────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-LOCK_FILE            = Path("/tmp/ml_retrain_v4.lock")
+LOCK_FILE            = PROJECT_ROOT / "ml" / "ml_retrain_v4.lock"
 TIMEOUT_SECS         = 2400          # 40 minutos máximo (multi-símbolo tarda más)
 LOOKBACK_MONTHS      = 18            # ventana de entrenamiento
 MIN_TRADES_DEFAULT   = 30            # mínimo para entrenar
@@ -855,16 +860,26 @@ def main(
         2 = skip (no hay suficientes datos)
     """
     # ── Timeout SIGALRM ────────────────────────────────────────────────────
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(TIMEOUT_SECS)
+    has_sigalrm = hasattr(signal, "SIGALRM")
+    if has_sigalrm:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(TIMEOUT_SECS)
 
     # ── Lock exclusivo (evitar ejecuciones paralelas) ──────────────────────
-    lock_fd = open(LOCK_FILE, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log.error("retrain_already_running")
-        return 1
+    lock_fd = None
+    if HAS_FCNTL:
+        lock_fd = open(LOCK_FILE, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.error("retrain_already_running")
+            return 1
+    else:
+        try:
+            lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            log.error("retrain_already_running")
+            return 1
 
     start_time = time.time()
     log.info(
@@ -1041,10 +1056,14 @@ def main(
         return 1
 
     finally:
-        signal.alarm(0)
+        if has_sigalrm:
+            signal.alarm(0)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
+            if HAS_FCNTL and lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            elif lock_fd is not None:
+                os.close(lock_fd)
             LOCK_FILE.unlink(missing_ok=True)
         except Exception:
             pass

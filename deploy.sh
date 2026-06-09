@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS ohlcv (
 CREATE INDEX IF NOT EXISTS idx_ohlcv_ts ON ohlcv(symbol, timeframe, timestamp);
 SQL_EOF
 
-DATABASE_URL="postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}"
+DATABASE_URL="postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}"
 ok "PostgreSQL configurado — DATABASE_URL inyectada"
 STATUS[postgresql]="OK"
 

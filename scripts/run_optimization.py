@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.logging_config import setup_logging, get_logger
 
-from backtesting.optimizer import HyperparameterOptimizer
+from backtesting.engine import HyperparameterOptimizer
 from data.storage import OHLCVStorage
 from config.settings import ALL_PAIRS
 

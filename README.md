@@ -1,226 +1,172 @@
-# Sistema de Trading Algorítmico de Criptomonedas
+# Sistema de Trading Algorítmico de Criptomonedas (ZimaBlade v6.0 - Adaptive Cycle)
 
-> **Fase 1: Backtesting Engine** — Motor de backtesting institucional para estrategias de trading en Binance
+Este repositorio contiene la versión consolidada, optimizada y auditada del sistema de trading algorítmico cuantitativo para criptomonedas, desplegado 24/7 en un servidor **ZimaBlade** (Intel Atom E3950, 16GB RAM, HDD mecánico, Debian 12 LXC sobre Proxmox).
+
+Filosofía del sistema: **"Preservar capital primero. Crecer segundo."**
 
 ---
 
-## 🚀 Inicio Rápido
+## 🚀 Inicio Rápido e Instalación
 
-### 1. Instalar dependencias
+### 1. Clonar e Instalar Dependencias
 
 ```bash
-# En Windows (local)
+# En Windows (desarrollo local)
 python -m venv venv
 venv\Scripts\activate
+pip install -r requirements.txt
 
-# En ZimaBlade (Ubuntu)
+# En ZimaBlade (Debian 12 LXC)
 python3 -m venv venv
 source venv/bin/activate
-
 pip install -r requirements.txt
 ```
 
-### 2. Configurar variables de entorno
+### 2. Configurar Variables de Entorno
+
+Copia el archivo de ejemplo y rellena los valores reales (especialmente API Keys de Binance y Tokens del Bot de Telegram):
 
 ```bash
 cp .env.example .env
-# Editar .env con tu capital y (para Fase 2+) tus API keys
 ```
 
-### 3. Descargar datos históricos
+### 3. Despliegue Automatizado en ZimaBlade
+
+Para instalar y arrancar los servicios en producción, ejecuta el script de despliegue (`deploy.sh`), el cual configura la base de datos PostgreSQL local en `127.0.0.1`, restaura el esquema y crea los servicios de `systemd`:
 
 ```bash
-# BTC/USDT y ETH/USDT, 2 años, timeframes 4H + 1H + 15M
-python scripts/download_data.py --pairs BTC/USDT ETH/USDT --timeframes 4h 1h 15m --years 2
-
-# Verificar datos descargados
-python scripts/download_data.py --status
-```
-
-### 4. Ejecutar backtesting
-
-```bash
-# Trend Following en BTC/USDT (estrategia principal)
-python scripts/run_backtest.py --symbol BTC/USDT --strategy trend_following --report
-
-# Mean Reversion en ETH/USDT
-python scripts/run_backtest.py --symbol ETH/USDT --strategy mean_reversion --report
-
-# Multi-par con descarga automática
-python scripts/run_backtest.py --all-pairs --strategy trend_following --download --report
+bash deploy.sh
 ```
 
 ---
 
-## 📁 Estructura del Proyecto
+## 📁 Estructura del Proyecto Consolidado
+
+Tras la auditoría y limpieza física, el proyecto mantiene una arquitectura modular estructurada en paquetes limpios:
 
 ```
 Sistema_Trading/
-├── config/
-│   ├── settings.py          # ⚙️  Configuración central (capital, pares, parámetros)
-│   └── logging_config.py    # 📋 Logs con structlog
+├── config/                  # ⚙️ Configuración central y logs
+│   ├── settings.py          # Parámetros del sistema, Pydantic BaseSettings, límites de riesgo
+│   └── logging_config.py    # Log estructurado con structlog
 │
-├── data/
-│   ├── fetcher.py           # 📥 Descarga OHLCV de Binance via ccxt
-│   ├── storage.py           # 💾 SQLite (Fase 1) / PostgreSQL (Fase 2+)
-│   └── cache.py             # ⚡ Cache en RAM para live trading
+├── data/                    # 📥 Capa de adquisición y persistencia
+│   ├── fetcher.py           # Descarga asíncrona de datos OHLCV de Binance via CCXT
+│   ├── storage.py           # Interfaz de persistencia (PostgreSQL/SQLite)
+│   ├── cache.py             # Caché en memoria RAM para live trading
+│   └── schema.sql           # Esquema de base de datos para PostgreSQL
 │
-├── indicators/
-│   ├── trend.py             # 📈 EMA 21/55/200, Supertrend, ADX
-│   ├── momentum.py          # 💫 RSI, MACD, Stoch RSI + divergencias
-│   ├── volatility.py        # 📊 ATR, Bollinger Bands, Keltner, BB Squeeze
-│   ├── volume.py            # 📦 OBV, VWAP, CVD, Volume Profile
-│   └── market_structure.py  # 🏗️  CHoCH, BOS, Order Blocks, FVG, Liquidity
+├── indicators/              # 📈 Cálculo optimizado de indicadores
+│   └── technical.py         # Batería consolidada de indicadores (SMC, VFI, Consensus, V5)
 │
-├── strategies/
-│   ├── base.py              # 🔧 Clase base + dataclass Signal
-│   ├── trend_following.py   # ✅ Estrategia 1 — Trend Following (60%)
-│   ├── mean_reversion.py    # ✅ Estrategia 2 — Mean Reversion (30%)
-│   └── breakout.py          # ✅ Estrategia 3 — Breakout (10%)
+├── strategies/              # 🎯 Estrategias cuantitativas
+│   └── signals.py           # Lógica consolidada de señales (TrendFollowing, MeanReversion, Breakout)
 │
-├── risk/
-│   ├── position_sizer.py    # 💰 Position sizing + circuit breakers drawdown
-│   ├── regime_filter.py     # 🎯 Clasificación de régimen de mercado
-│   └── psychology.py        # 🧠 Anti-revenge, anti-FOMO, anti-overtrading
+├── risk/                    # 🛡️ Gestión de riesgo y régimen de mercado
+│   ├── position_sizer.py    # Control del tamaño de posición y drawdown (circuit breakers)
+│   └── regime_filter.py     # Detección del ciclo macro y clasificación de régimen
 │
-├── backtesting/
-│   ├── engine.py            # 🏎️  Motor event-driven a nivel de vela
-│   ├── portfolio.py         # 📁 Portfolio simulado (comisiones + slippage)
-│   ├── metrics.py           # 📊 Win Rate, PF, Sharpe, Drawdown, etc.
-│   └── report.py            # 📄 Informe HTML interactivo con Plotly
+├── backtesting/             # 🏎️ Motor de simulación histórica
+│   ├── engine.py            # Motor event-driven a nivel de vela, portafolio y optimizador
+│   └── metrics.py           # Cálculo de métricas (Sharpe, Profit Factor, Win Rate, Drawdowns)
 │
-├── journal/
-│   └── trade_logger.py      # 📝 Journal SQLite + CSV
+├── ml/                      # 🧠 Capa de Machine Learning (Meta-Labeling)
+│   ├── meta_labeler.py      # Filtro RandomForest para clasificar probabilidad de señal ganadora
+│   └── retrain_model.py     # Script mensual autónomo de reentrenamiento (compatible con Win/Linux)
 │
-├── scripts/
-│   ├── download_data.py     # CLI: descargar datos históricos
-│   └── run_backtest.py      # CLI: ejecutar backtesting
+├── monitoring/              # 🔔 Monitoreo e interfaces de control
+│   └── telegram_bot.py      # Bot interactivo de Telegram para control y notificaciones
 │
-└── tests/
-    ├── test_indicators.py
-    └── test_backtesting.py
+├── scripts/                 # 🛠️ Herramientas CLI de ejecución
+│   ├── download_data.py     # Descarga de históricos de datos
+│   ├── run_backtest.py      # Ejecución de backtests históricos
+│   └── run_optimization.py  # Optimización de hiperparámetros
+│
+├── tests/                   # 🧪 Pruebas unitarias
+│   ├── test_indicators.py   # Validación matemática de indicadores
+│   └── test_backtesting.py  # Validación del motor y métricas de backtesting
+│
+├── live_engine.py           # 🚀 Motor principal de ejecución productiva (Adaptive Cycle)
+├── paper_portfolio.py       # 📄 Portafolio virtual en producción para paper trading
+├── deploy.sh                # 📦 Script de despliegue automatizado para ZimaBlade
+└── requirements.txt         # Dependencias del proyecto
 ```
 
 ---
 
-## 📊 Estrategias Implementadas
+## ⚙️ Modos de Operación
 
-### Estrategia 1: Trend Following (60% del tiempo)
+### 1. Ejecución del Bot en Producción (ZimaBlade)
 
-| Condición | Valor |
-|-----------|-------|
-| EMA alignment en 4H | EMA21 > EMA55 > EMA200 |
-| Precio | Sobre EMA 21 en 1H |
-| ADX | > 25 (tendencia fuerte) |
-| RSI | Entre 45-65 (zona neutra) |
-| MACD | Positivo y creciente |
-| Entrada | Retroceso a EMA21 u Order Block |
-| Stop Loss | 1 ATR bajo swing low reciente |
-| TP1 | 2:1 R/R (cerrar 50%) |
-| TP2 | 3:1 R/R (trailing stop) |
-
-### Estrategia 2: Mean Reversion (30% del tiempo)
-
-| Condición | Valor |
-|-----------|-------|
-| Régimen | ADX < 20, mercado en rango |
-| RSI | < 35 (long) o > 65 (short) |
-| Precio | Tocando banda inferior/superior BB |
-| Confirmación | Soporte/resistencia + Divergencia Stoch RSI |
-| Stop Loss | Fuera de BB + 0.5 ATR |
-| TP1 | EMA 21 |
-| TP2 | Banda opuesta BB |
-
-### Estrategia 3: Breakout (10% del tiempo)
-
-| Condición | Valor |
-|-----------|-------|
-| Prerequisito | BB Squeeze activo > 10 velas |
-| Volumen | > 150% del promedio de 20 periodos |
-| Entrada | Retesteo del nivel roto |
-
----
-
-## 💰 Gestión de Riesgo
-
-```
-Capital inicial: 300€ → Riesgo fijo $10/trade
-
-Escala de compounding:
-  $0   - $1,000  → $10 fijo (aprendizaje)
-  $1K  - $5K     → 1% por trade
-  $5K  - $20K    → 1.5% por trade
-  $20K+          → 2% por trade (máximo)
-
-Circuit Breakers (automáticos):
-  > 3% drawdown diario  → Parar el día
-  > 6% drawdown semanal → Revisar sistema
-  > 10% drawdown mes    → Modo solo-estudio
-```
-
----
-
-## 🎯 Objetivos de Fase 1 (Backtesting)
-
-| Métrica | Objetivo | Descripción |
-|---------|----------|-------------|
-| Win Rate | ≥ 45% | Al menos 45 de cada 100 trades ganadores |
-| Profit Factor | ≥ 1.5 | $1.50 ganados por cada $1 perdido |
-| Sharpe Ratio | ≥ 1.0 | Retorno ajustado por riesgo aceptable |
-| Max Drawdown | ≤ 15% | Máxima caída desde el pico |
-
----
-
-## 🧪 Tests
+El bot corre como un servicio daemonizado gestionado por `systemd`. Para iniciarlo de manera manual:
 
 ```bash
-# Ejecutar todos los tests
-pytest tests/ -v
+# Modo Paper Trading (Valores por defecto de PAPER_MODE=true en .env)
+python live_engine.py
 
-# Con cobertura
-pytest tests/ --cov=. --cov-report=html
+# Modificar modo de operación mediante variables de entorno
+PAPER_MODE=true python live_engine.py
+```
+
+### 2. Backtesting Histórico
+
+Puedes simular el rendimiento de una estrategia con datos históricos previamente descargados:
+
+```bash
+# Ejecutar Backtest con estrategia de seguimiento de tendencia en BTC/USDC
+python scripts/run_backtest.py --symbol BTC/USDC --strategy trend_following --report
+
+# Ejecutar Backtest multi-par con descarga automática de datos omitidos
+python scripts/run_backtest.py --all-pairs --strategy trend_following --download --report
+```
+
+### 3. Optimización de Hiperparámetros
+
+Ejecuta búsquedas en cuadrícula para encontrar los mejores parámetros de indicadores y stop loss:
+
+```bash
+python scripts/run_optimization.py
+```
+
+### 4. Reentrenamiento del Modelo ML
+
+Para reentrenar de forma manual el clasificador de señales (Meta-Labeler):
+
+```bash
+python ml/retrain_model.py
 ```
 
 ---
 
-## 🔄 Fases del Sistema
+## 🛡️ Parámetros Críticos y Gestión de Riesgo
 
-| Fase | Estado | Descripción |
-|------|--------|-------------|
-| **Fase 1** | ✅ **ACTIVA** | Backtesting con 2 años de datos |
-| **Fase 2** | ⏳ Pendiente | Paper Trading en tiempo real |
-| **Fase 3** | ⏳ Pendiente | Live Trading Micro ($100-$500) |
-| **Fase 4** | ⏳ Pendiente | Scaling con compounding |
+El sistema implementa reglas estrictas que preservan el capital:
 
----
-
-## 📋 Activos del Universo
-
-| Prioridad | Pares | Condición |
-|-----------|-------|-----------|
-| P1 — Alta liquidez | BTC/USDT, ETH/USDT | Siempre disponibles |
-| P2 — Media | SOL/USDT, BNB/USDT, AVAX/USDT | Volatilidad media |
-| P3 — Baja (solo tendencia) | LINK/USDT, DOT/USDT, MATIC/USDT | Solo ADX > 25 |
+*   **Riesgo por Trade:** Máximo 1% del capital acumulado por operación (compounding dinámico). En cuentas pequeñas (< $1000) se puede fijar una cantidad fija (ej. $10).
+*   **Stop Loss Estricto:** Mínimo de 1.5 ATR. Ningún trade se ejecuta sin SL.
+*   **Límite de Exposición:** Máximo de 3 posiciones abiertas simultáneamente en toda la cartera.
+*   **Circuit Breakers (Drawdown Tracker):**
+    *   Si el drawdown diario supera el **3%**, el sistema pausa las operaciones del día.
+    *   Si el drawdown semanal supera el **6%**, el sistema se bloquea para revisión.
+    *   Si el drawdown mensual supera el **10%**, el bot entra en modo de solo estudio de mercado.
 
 ---
 
-## ⚙️ Infraestructura (ZimaBlade)
+## 🧪 Verificación y Control de Calidad
 
-- **OS**: Ubuntu Server 24.04 LTS (LXC en Proxmox)
-- **BD Fase 1**: SQLite con WAL mode + 64MB cache RAM
-- **BD Fase 2+**: PostgreSQL
-- **Monitoring**: Grafana + InfluxDB
-- **Alertas**: Telegram Bot (Fase 2+)
-- **Scheduler**: APScheduler / systemd timer
+El proyecto incluye un script de auditoría y verificación integral que valida que ningún cambio afecte el flujo del sistema:
 
----
+1.  **Syntax Check:** Validación mediante `ast.parse` de cada archivo `.py`.
+2.  **Import Resolution Check:** Asegura que todos los módulos se importan correctamente.
+3.  **Unit Tests:** Ejecución completa de `pytest`.
+4.  **Signal Pipeline Test:** Generación de al menos 3 señales con datos sintéticos.
 
-## 📝 Notas Legales (España)
+Para ejecutar los tests unitarios tradicionales de forma individual:
 
-Las ganancias por trading de criptomonedas tributan como **ganancias patrimoniales (IRPF)**.
-El journal CSV es compatible con **Koinly** y **CoinTracking** para el cálculo fiscal.
-Ver Modelo 720 si activos en exchange extranjero > €50,000.
+```bash
+python -m pytest tests/ -v
+```
 
 ---
 
-*Sistema de Trading Algorítmico v1.0 — Fase 1: Backtesting*
+*Sistema de Trading Algorítmico v6.0 — Consolidado y Listo para Producción 24/7*
