@@ -85,6 +85,7 @@ class PaperPortfolio:
             remaining_units DECIMAL(18,8) NOT NULL,
             binance_order_id VARCHAR(50),
             ml_proba DECIMAL(5,4),
+            atr_entry DECIMAL(18,8) DEFAULT 0,  -- ATR real en el momento de apertura
             status VARCHAR(20) DEFAULT 'open'
         );
 
@@ -185,6 +186,9 @@ class PaperPortfolio:
         ml_proba: float,
         direction: str = "long",
         regime: Optional[str] = None,
+        risk_amount: Optional[float] = None,
+        notional_usd: Optional[float] = None,
+        atr: float = 0.0,    # ATR real en el momento de apertura (para trailing stop)
     ) -> Dict[str, Any]:
         """
         Simula apertura de una posición.
@@ -199,7 +203,11 @@ class PaperPortfolio:
             else entry_price * (1 - SLIPPAGE_RATE - COMMISSION_RATE)
 
         commission = units * fill_price * COMMISSION_RATE
-        risk_amount = abs(fill_price - stop_loss) * units
+        
+        # risk_amount: preferir el valor calculado por compute_position_size en el motor;
+        # si no se pasa (None), calcularlo desde la distancia al SL.
+        _risk_computed = abs(fill_price - stop_loss) * units
+        _risk_to_store = risk_amount if risk_amount is not None else _risk_computed
 
         now = datetime.now(tz=timezone.utc)
 
@@ -209,11 +217,11 @@ class PaperPortfolio:
                     INSERT INTO positions
                         (symbol, strategy, direction, entry_time, entry_price,
                          stop_loss, tp1, tp2, units, risk_amount, tp1_hit,
-                         remaining_units, ml_proba, status)
+                         remaining_units, ml_proba, atr_entry, status)
                     VALUES
                         (:symbol, :strategy, :direction, :entry_time, :entry_price,
                          :stop_loss, :tp1, :tp2, :units, :risk_amount, FALSE,
-                         :units, :ml_proba, 'open')
+                         :units, :ml_proba, :atr_entry, 'open')
                     RETURNING id
                 """),
                 {
@@ -226,8 +234,9 @@ class PaperPortfolio:
                     "tp1":         tp1,
                     "tp2":         tp2,
                     "units":       units,
-                    "risk_amount": risk_amount,
+                    "risk_amount": _risk_to_store,
                     "ml_proba":    ml_proba,
+                    "atr_entry":   atr if atr > 0 else fill_price * 0.015,  # fallback: 1.5% del precio
                 },
             )
             position_id = result.fetchone()[0]
@@ -341,11 +350,14 @@ class PaperPortfolio:
                     closed.append(closed_trade)
                     continue
 
-                # ── Trailing stop post-TP1 ────────────────────────────────────
+                # ── Trailing stop post-TP1 ─────────────────────────────────
                 if tp1_hit:
                     peak = self._max_price.get(pos_id, price)
-                    atr_est = peak * 0.015   # estimación de ATR ~1.5% del precio
-                    trailing_sl = peak - ATR_TRAILING_MULT * atr_est
+                    # Usar ATR real guardado en el momento de apertura.
+                    # Fallback: 1.5% del precio pico si no está disponible.
+                    atr_saved = float(pos.get("atr_entry", 0) or 0)
+                    atr_for_trail = atr_saved if atr_saved > 0 else peak * 0.015
+                    trailing_sl = peak - ATR_TRAILING_MULT * atr_for_trail
                     if trailing_sl > sl and low <= trailing_sl:
                         closed_trade = await self.close_position(
                             pos_id, trailing_sl, "trailing_stop"

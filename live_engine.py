@@ -94,6 +94,8 @@ CORRELATION_GROUPS: Dict[str, str] = {
     "ETH/USDC": "altcoin", "SOL/USDC": "altcoin",
     "BNB/USDC": "altcoin", "LINK/USDC": "altcoin", "AVAX/USDC": "altcoin",
 }
+# Pares de alta prioridad: únicos activos en BEAR_DEEP (reduce CPU 66%)
+SYMBOLS_BEAR_DEEP: List[str] = ["BTC/USDC", "ETH/USDC"]
 MAX_CORR_POS          = 1
 MR_HOURS_BEAR         = range(0, 8)     # MR solo sesión asiática en BEAR
 MR_HOURS_ACCUM        = range(0, 16)    # MR más amplio en acumulación
@@ -102,7 +104,10 @@ COOLDOWN_SL_MIN       = 90
 CB_DAILY_REDUCE       = -0.030
 CB_DAILY_PAUSE        = -0.050
 CB_PEAK_SHUTDOWN      = -0.080
-FAST_LOOP_S           = 60
+# Circuit breaker por símbolo: suspender 4h si ≥3 SL consecutivos
+CB_SL_CONSECUTIVE     = 3
+CB_SL_SUSPEND_MIN     = 240
+FAST_LOOP_S           = 45      # 45s en lugar de 60s: más reactivo, coste mínimo
 CANDLE_BUFFER         = 8
 
 
@@ -167,10 +172,14 @@ class SignalResult:
 
 @dataclass
 class SymbolState:
-    last_sl_time:  float = 0.0
-    sl_count_24h:  int   = 0
-    cycle:         Optional[CycleState] = None
-    cycle_updated: float = 0.0   # timestamp de última actualización del ciclo
+    last_sl_time:       float = 0.0
+    sl_count_24h:       int   = 0
+    sl_consecutive:     int   = 0    # SL consecutivos actuales (sin win intermedio)
+    sl_suspend_until:   float = 0.0  # timestamp hasta el cual el símbolo está suspendido
+    last_enrich_price:  float = 0.0  # último precio de cierre enriquecido (cache)
+    last_enrich_df:     Optional[Any] = None   # DataFrame enriquecido en caché
+    cycle:              Optional[CycleState] = None
+    cycle_updated:      float = 0.0   # timestamp de última actualización del ciclo
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,12 +367,27 @@ def _quality(score: float) -> str:
 
 
 def _targets(entry: float, stop: float, direction: str, ctx: V5Context) -> Tuple[float,float,float]:
-    """TP1=1×R, TP2=2×R, TP3=3.5×R. Si hay nivel Fibonacci cerca de TP2, usarlo."""
+    """
+    Calcula los take profits con relación riesgo/beneficio optimizada:
+      TP1 = 1.5R  → cierre parcial 50% (asegura ganancia con win rate ≥35%)
+      TP2 = 3.0R  → objetivo principal 1:3 (compounding sostenible)
+      TP3 = 5.0R  → trailing stop largo en trades excepcionales
+
+    Si hay un nivel Fibonacci cercano a TP2 (±1%), se ajusta TP2 a ese nivel
+    para respetar resistencias naturales del mercado.
+    """
     dist = abs(entry - stop)
     if direction == "long":
-        tp1, tp2, tp3 = entry+dist, entry+2*dist, entry+3.5*dist
+        tp1 = entry + dist * 1.5
+        tp2 = entry + dist * 3.0
+        tp3 = entry + dist * 5.0
+        # Ajuste Fibonacci en TP2 si hay nivel cercano
+        if ctx.fib_tp2 > tp1 and abs(ctx.fib_tp2 - tp2) / tp2 < 0.015:
+            tp2 = ctx.fib_tp2
     else:
-        tp1, tp2, tp3 = entry-dist, entry-2*dist, entry-3.5*dist
+        tp1 = entry - dist * 1.5
+        tp2 = entry - dist * 3.0
+        tp3 = entry - dist * 5.0
     return tp1, tp2, tp3
 
 
@@ -879,20 +903,43 @@ class LiveEngineV6:
             await asyncio.sleep(wait + CANDLE_BUFFER)
             if self.state["kill"] or self.state["paused"]:
                 continue
-            for symbol in SYMBOLS:
+            # Optimización ZimaBlade: en BEAR_DEEP solo analizar BTC+ETH
+            bear_deep_syms = set()
+            for sym, ss in self._sym_state.items():
+                if ss.cycle and ss.cycle.phase in ("BEAR_DEEP", "BEAR_RECOVERY"):
+                    bear_deep_syms.add(sym)
+            active_symbols = (
+                SYMBOLS_BEAR_DEEP
+                if len(bear_deep_syms) >= len(SYMBOLS) // 2  # mayoría en bear deep
+                else SYMBOLS
+            )
+            for symbol in active_symbols:
                 try:
                     await self._analyze_symbol(symbol)
                 except Exception as exc:
                     log.exception("analysis_error_v6", symbol=symbol, error=str(exc))
 
     async def _analyze_symbol(self, symbol: str) -> None:
-        df = await self._fetch_candles(symbol, TF_STRUCTURE, 500)
-        if df is None or len(df) < 220:
+        # ── Optimización ZimaBlade: caché de DataFrame enriquecido ────────────
+        # Si la vela de 1H no ha cerrado y el precio no varió >0.2%, reusar el df
+        df_raw = await self._fetch_candles(symbol, TF_STRUCTURE, 300)  # 300 velas (era 500)
+        if df_raw is None or len(df_raw) < 220:
             return
-        try:
-            df = enrich_dataframe(df)
-        except Exception as exc:
-            log.warning("enrich_error_v6", symbol=symbol, error=str(exc)); return
+
+        ss = self._sym_state[symbol]
+        last_close = float(df_raw["close"].iloc[-1])
+        price_drift = abs(last_close - ss.last_enrich_price) / max(ss.last_enrich_price, 1e-10)
+
+        if ss.last_enrich_df is not None and price_drift < 0.002:
+            # Precio movió <0.2% desde el último enriquecimiento → reusar
+            df = ss.last_enrich_df
+        else:
+            try:
+                df = enrich_dataframe(df_raw)
+                ss.last_enrich_price = last_close
+                ss.last_enrich_df    = df
+            except Exception as exc:
+                log.warning("enrich_error_v6", symbol=symbol, error=str(exc)); return
 
         regime = detect_regime(df, symbol)
         if not regime.is_tradeable:
@@ -951,9 +998,21 @@ class LiveEngineV6:
 
         # Cooldown tras SL
         ss = self._sym_state[symbol]
-        if time.time() - ss.last_sl_time < COOLDOWN_SL_MIN * 60: return
+        now_ts = time.time()
+        if now_ts - ss.last_sl_time < COOLDOWN_SL_MIN * 60: return
 
-        # Circuit breakers
+        # ── Circuit breaker: SL consecutivos por símbolo ──────────────────────
+        if ss.sl_consecutive >= CB_SL_CONSECUTIVE:
+            if now_ts < ss.sl_suspend_until:
+                log.info("symbol_suspended_consecutive_sl", symbol=symbol,
+                         count=ss.sl_consecutive,
+                         resume_in_min=int((ss.sl_suspend_until - now_ts) / 60))
+                return
+            else:
+                # Expiró la suspensión → reiniciar contador
+                ss.sl_consecutive = 0
+
+        # Circuit breakers diarios
         capital  = await self._portfolio.get_current_capital()
         daily    = await self._portfolio.get_daily_stats()
         pnl_pct  = float(daily.get("pnl_today",0)) / capital if capital > 0 else 0
@@ -968,28 +1027,42 @@ class LiveEngineV6:
             return
         last15 = df15.iloc[-1]
         c15    = float(last15["close"])
-        drift  = abs(c15-signal.entry_price)/signal.entry_price*100
+        drift  = abs(c15 - signal.entry_price) / signal.entry_price * 100
         if drift > 1.5:
             self._pending.pop(symbol, None); return
 
-        micro = (int(float(last15.get("rsi",50))>50) +
-                 int(bool(last15.get("macd_bull",False))) +
-                 int(bool(last15.get("above_vwap",False))))
+        # ── Confirmación micro 15M ────────────────────────────────────────────
+        micro = (int(float(last15.get("rsi", 50)) > 50) +
+                 int(bool(last15.get("macd_bull", False))) +
+                 int(bool(last15.get("above_vwap", False))))
         if micro == 0: return
+
+        # ── Filtro de volumen: vela de entrada debe tener volumen activo ───────
+        # Volumen de la última vela 15M debe ser >= 80% del promedio de 20 velas
+        # Evita entradas en velas "muertas" con alta tasa de falsos positivos
+        vol_ratio_15m = float(last15.get("vol_ratio", 1.0))
+        if vol_ratio_15m < 0.80:
+            log.debug("entry_skipped_low_volume", symbol=symbol,
+                      vol_ratio=f"{vol_ratio_15m:.2f}")
+            return
 
         signal.entry_price = c15
         units, risk, notional = compute_position_size(signal, capital, len(open_pos), pnl_pct)
         if units <= 0: return
 
         cycle   = signal.cycle
-        cap_pct = notional/capital*100 if capital > 0 else 0
+        cap_pct = notional / capital * 100 if capital > 0 else 0
 
         log.info("trade_opening_v6", symbol=symbol,
                  strategy=signal.strategy, score=f"{signal.score:.0f}",
                  quality=signal.quality, entry=f"${c15:.4f}",
                  sl=f"${signal.stop_loss:.4f}",
+                 tp1=f"${signal.tp1:.4f}", tp2=f"${signal.tp2:.4f}",
+                 rr_tp1=f"{abs(signal.tp1-c15)/max(abs(c15-signal.stop_loss),1e-10):.1f}R",
+                 rr_tp2=f"{abs(signal.tp2-c15)/max(abs(c15-signal.stop_loss),1e-10):.1f}R",
                  risk=f"${risk:.2f}", notional=f"${notional:.2f}",
                  cap_pct=f"{cap_pct:.1f}%",
+                 vol_ratio_15m=f"{vol_ratio_15m:.2f}",
                  phase=cycle.phase if cycle else "?",
                  risk_mult=f"{cycle.risk_multiplier:.0%}" if cycle else "?",
                  ml=f"{signal.ml_proba:.0%}")
@@ -1002,6 +1075,7 @@ class LiveEngineV6:
             units=units, ml_proba=signal.ml_proba,
             direction=signal.direction, regime=signal.regime.regime,
             risk_amount=risk, notional_usd=notional,
+            atr=signal.atr,   # ATR real para trailing stop dinámico
         )
         if self._bot:
             await self._bot.send_trade_open(trade)
@@ -1022,13 +1096,29 @@ class LiveEngineV6:
 
             closed = await self._portfolio.update_positions(prices)
             for ct in closed:
-                reason = ct.get("exit_reason","")
+                reason = ct.get("exit_reason", "")
                 if self._bot:
                     await self._bot.send_trade_close(ct, reason)
-                if "stop" in reason.lower():
-                    sym = ct.get("symbol","")
-                    if sym in self._sym_state:
-                        self._sym_state[sym].last_sl_time = time.time()
+                sym = ct.get("symbol", "")
+                if sym in self._sym_state:
+                    ss = self._sym_state[sym]
+                    if "stop" in reason.lower():
+                        ss.last_sl_time   = time.time()
+                        ss.sl_consecutive += 1
+                        if ss.sl_consecutive >= CB_SL_CONSECUTIVE:
+                            ss.sl_suspend_until = time.time() + CB_SL_SUSPEND_MIN * 60
+                            log.warning("symbol_auto_suspended", symbol=sym,
+                                        consecutive_sl=ss.sl_consecutive,
+                                        suspend_min=CB_SL_SUSPEND_MIN)
+                            if self._bot:
+                                # Notificar suspensión por Telegram
+                                await self._bot.send_message(
+                                    f"⚠️ {sym} suspendido {CB_SL_SUSPEND_MIN}min "
+                                    f"({ss.sl_consecutive} SL consecutivos)"
+                                )
+                    else:
+                        # Trade cerrado en ganancia → reiniciar contador de SL consecutivos
+                        ss.sl_consecutive = 0
 
             capital = await self._portfolio.get_current_capital()
             daily   = await self._portfolio.get_daily_stats()
