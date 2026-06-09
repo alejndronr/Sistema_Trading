@@ -108,11 +108,12 @@ class AssetConfig:
     priority: AssetPriority
     max_slippage: float          # Porcentaje máximo de slippage tolerado
     min_volume_24h_usd: float    # Volumen mínimo en USD para operar
+    allow_shorts: bool = True    # Permite ventas en corto (Margin) para este activo
 
 
 ASSETS: Dict[str, AssetConfig] = {
     # Prioridad 1 — Alta liquidez
-    "BTC/USDC": AssetConfig("BTC/USDC", AssetPriority.HIGH, 0.001, 100_000_000),
+    "BTC/USDC": AssetConfig("BTC/USDC", AssetPriority.HIGH, 0.001, 100_000_000, allow_shorts=False),
     "ETH/USDC": AssetConfig("ETH/USDC", AssetPriority.HIGH, 0.001, 100_000_000),
     # Prioridad 2 — Volatilidad media
     "SOL/USDC": AssetConfig("SOL/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),

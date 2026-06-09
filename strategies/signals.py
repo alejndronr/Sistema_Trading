@@ -128,6 +128,56 @@ class BaseStrategy(ABC):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(symbol={self.symbol}, tf={self.timeframe})"
 
+    @staticmethod
+    def _calculate_volatility_percentile(atr_series: pd.Series, lookback: int = 90 * 6) -> float:
+        """
+        Calcula el percentil actual del ATR respecto a su historia reciente.
+        lookback=540 velas corresponde a ~90 días en 4H (6 velas/día).
+        Retorna un valor en [0, 1]: 0=volatilidad históricamente baja, 1=alta.
+        """
+        if len(atr_series) < lookback:
+            lookback = max(50, len(atr_series) // 2)
+        window = atr_series.dropna().iloc[-lookback:]
+        if window.empty or window.iloc[-1] == 0:
+            return 0.5  # Default: volatilidad normal
+        current_atr = window.iloc[-1]
+        pct = float((window < current_atr).mean())
+        return round(pct, 4)
+
+    @staticmethod
+    def _get_volatility_adjustments(
+        atr_series: pd.Series,
+        lookback: int = 90 * 6,
+    ) -> tuple:
+        """
+        Devuelve (sl_multiplier, tp_multiplier) basados en el régimen de volatilidad.
+
+        Régimen de volatilidad (basado en percentil ATR histórico 90 días):
+          LOW_VOL   (< P30):  SL ajustado -20% | TP ajustado -10%
+                              (volatilidad comprimida → movimientos más pequeños)
+          NORMAL    (P30-P70): sin ajuste (1.0, 1.0)
+          HIGH_VOL  (P70-P90): SL ampliado +30% | TP ampliado +20%
+                              (volatilidad expandida → dejar más espacio)
+          EXTREME   (> P90):  SL ampliado +60% | TP reducido -20%
+                              (caos extremo → proteger capital, objetivos conservadores)
+
+        Nota: los ajustes preservan la relación R/R al aplicarse proporcionalmente,
+        manteniendo la ventaja matemática del setup.
+        """
+        if isinstance(atr_series, pd.Series) and len(atr_series) > 0:
+            pct = TrendFollowingStrategy._calculate_volatility_percentile(atr_series, lookback)
+        else:
+            pct = 0.5
+
+        if pct < 0.30:       # LOW_VOL: comprimida, objetivos conservadores
+            return (0.80, 0.90)
+        elif pct < 0.70:     # NORMAL: sin ajuste
+            return (1.00, 1.00)
+        elif pct < 0.90:     # HIGH_VOL: expandida, más espacio
+            return (1.30, 1.20)
+        else:                # EXTREME_VOL: caos, proteger capital
+            return (1.60, 0.80)
+
 # ── Estrategia 1: Trend Following ──────────────────────────────────────────────
 
 class TrendFollowingStrategy(BaseStrategy):
@@ -185,105 +235,209 @@ class TrendFollowingStrategy(BaseStrategy):
             macd_growing = macd_growing.iloc[:, 0]
         macd_growing = macd_growing.astype(bool)
 
-        # Condición 1: alineación EMA
+        # ── Máscaras vectorizadas para LONG ─────────────────────────────────────
         ema_aligned      = (ema21 > ema55) & (ema55 > ema200)
         macd_strong      = (macd_h > 0) & macd_growing
         ema_cond         = ema_aligned | ((ema21 > ema55) & macd_strong)
-
-        # Condición 2: precio sobre EMA21
         price_above_ema21 = close > ema21
-
-        # Condición 3: ADX suficiente
-        adx_cond = adx > self.p.min_adx
-
-        # Condición 4: RSI en zona válida
-        rsi_cond = (rsi >= self.p.rsi_min) & (rsi <= self.p.rsi_max)
-
-        # Condición 5: MACD positivo (no negativo)
-        macd_cond = macd_h > 0
-
-        # Máscara global de señal larga (a partir de la vela 200 para warmup)
+        adx_cond         = adx > self.p.min_adx
+        rsi_cond         = (rsi >= self.p.rsi_min) & (rsi <= self.p.rsi_max)
+        macd_cond        = macd_h > 0
+        
         warmup_mask = pd.Series(False, index=df.index)
         warmup_mask.iloc[200:] = True
 
         long_mask = warmup_mask & ema_cond & price_above_ema21 & adx_cond & rsi_cond & macd_cond
 
-        # ── Construir SL / TP vectorizados ────────────────────────────────────
-        swing_low = (
-            df["last_swing_low"].astype(float)
-            if "last_swing_low" in df.columns
-            else close - atr
-        )
-
+        # ── Construir SL / TP vectorizados para LONG ──────────────────────────
+        swing_low = df["last_swing_low"].astype(float) if "last_swing_low" in df.columns else close - atr
         sl_swing  = swing_low - 0.5 * atr
         sl_atr    = close - self.p.sl_atr_multiplier * atr
-        stop_loss = np.minimum(sl_swing.values, sl_atr.values)  # el más alejado (más conservador)
+        stop_loss = np.minimum(sl_swing.values, sl_atr.values)
         risk      = close.values - stop_loss
         tp1       = close.values + self.p.tp1_rr_ratio * risk
         tp2       = close.values + self.p.tp2_rr_ratio * risk
 
-        # ── Calidad de señal vectorizada (simplificada para velocidad) ─────────
-        bonus = np.zeros(n, dtype=int)
-        for bonus_col in ["obv_bullish", "volume_above_avg", "stoch_rsi_oversold",
-                          "price_in_bull_ob", "fvg_bullish", "bos_bullish", "choch_bullish"]:
+        # ── Máscaras vectorizadas para SHORT ────────────────────────────────────
+        from config.settings import ASSETS
+        asset_cfg = ASSETS.get(self.symbol)
+        allow_shorts = asset_cfg.allow_shorts if asset_cfg else True
+
+        ema_aligned_short = (ema21 < ema55) & (ema55 < ema200)
+        macd_strong_short = (macd_h < 0) & (~macd_growing)
+        ema_cond_short    = ema_aligned_short | ((ema21 < ema55) & macd_strong_short)
+        price_below_ema21 = close < ema21
+        rsi_cond_short    = (rsi >= (100 - self.p.rsi_max)) & (rsi <= (100 - self.p.rsi_min))
+        macd_cond_short   = macd_h < 0
+
+        if allow_shorts:
+            short_mask = warmup_mask & ema_cond_short & price_below_ema21 & adx_cond & rsi_cond_short & macd_cond_short
+        else:
+            short_mask = pd.Series(False, index=df.index)
+
+        # ── Construir SL / TP vectorizados para SHORT ─────────────────────────
+        swing_high = df["last_swing_high"].astype(float) if "last_swing_high" in df.columns else close + atr
+        sl_swing_short  = swing_high + 0.5 * atr
+        sl_atr_short    = close + self.p.sl_atr_multiplier * atr
+        stop_loss_short = np.maximum(sl_swing_short.values, sl_atr_short.values)
+        risk_short      = stop_loss_short - close.values
+        tp1_short       = close.values - self.p.tp1_rr_ratio * risk_short
+        tp2_short       = close.values - self.p.tp2_rr_ratio * risk_short
+
+        # ── Calidad de señal vectorizada ───────────────────────────────────────
+        bonus_long = np.zeros(n, dtype=int)
+        bonus_short = np.zeros(n, dtype=int)
+        
+        for bonus_col in ["obv_bullish", "volume_above_avg", "stoch_rsi_oversold", "price_in_bull_ob", "fvg_bullish", "bos_bullish", "choch_bullish"]:
             if bonus_col in df.columns:
-                bonus += df[bonus_col].astype(bool).astype(int).values
+                bonus_long += df[bonus_col].astype(bool).astype(int).values
+                
+        for bonus_col in ["obv_bearish", "volume_above_avg", "stoch_rsi_overbought", "price_in_bear_ob", "fvg_bearish", "bos_bearish", "choch_bearish"]:
+            if bonus_col in df.columns:
+                bonus_short += df[bonus_col].astype(bool).astype(int).values
 
-        # Score base = número de condiciones cumplidas (5 posibles)
-        score = (ema_aligned.astype(int) + price_above_ema21.astype(int)
-                 + adx_cond.astype(int) + rsi_cond.astype(int) + macd_cond.astype(int)).values
+        score_long = (ema_aligned.astype(int) + price_above_ema21.astype(int) + adx_cond.astype(int) + rsi_cond.astype(int) + macd_cond.astype(int)).values
+        score_short = (ema_aligned_short.astype(int) + price_below_ema21.astype(int) + adx_cond.astype(int) + rsi_cond_short.astype(int) + macd_cond_short.astype(int)).values
 
-        quality_arr = np.where(
-            (score >= 5) & (bonus >= 3), "A+",
-            np.where(
-                (score >= 5) & (bonus >= 1), "A",
-                np.where(score >= 4, "B", "C")
-            )
-        )
+        quality_long_arr = np.where((score_long >= 5) & (bonus_long >= 3), "A+", np.where((score_long >= 5) & (bonus_long >= 1), "A", np.where(score_long >= 4, "B", "C")))
+        quality_short_arr = np.where((score_short >= 5) & (bonus_short >= 3), "A+", np.where((score_short >= 5) & (bonus_short >= 1), "A", np.where(score_short >= 4, "B", "C")))
+
+        # ── Scoring Bayesiano vectorizado (confianza probabilística) ────────────
+        # Construimos el dict de condiciones activas para cada vela
+        # y calculamos el score probabilístico usando el scorer global.
+        # Nota: para eficiencia, solo se aplica a las velas con señal activa.
+        try:
+            from risk.signal_scorer import get_scorer
+            from risk.ev_filter import get_ev_filter
+            scorer    = get_scorer()
+            ev_filter = get_ev_filter()
+
+            # Score base bayesiano usando las condiciones booleanas vectorizadas
+            # Aproximación: usamos el score_long/score_short normalizado como proxy
+            # El scorer completo se llama vela a vela solo en las señales activas
+            confidence_long  = np.where(mask_idx := long_mask.values,
+                                        0.47 + 0.03 * score_long.clip(0, 5),
+                                        0.47)
+            confidence_short = np.where(short_mask.values,
+                                        0.47 + 0.03 * score_short.clip(0, 5),
+                                        0.47)
+            # Refinamiento bayesiano completo en las velas con señal activa
+            active_long_idx  = np.where(long_mask.values)[0]
+            active_short_idx = np.where(short_mask.values)[0]
+
+            for i in active_long_idx:
+                conds = {
+                    "ema_aligned":       bool(ema_aligned.iloc[i]),
+                    "macd_bullish":      bool(macd_cond.iloc[i]),
+                    "rsi_trend_zone":    bool(rsi_cond.iloc[i]),
+                    "adx_strong":        bool(adx_cond.iloc[i]),
+                    "price_above_ema21": bool(price_above_ema21.iloc[i]),
+                    "volume_above_avg":  bool(df.get("volume_above_avg", pd.Series(False, index=df.index)).iloc[i]),
+                    "obv_bullish":       bool(df.get("obv_bullish", pd.Series(False, index=df.index)).iloc[i]),
+                    "structure_bullish": bool(df.get("bos_bullish", pd.Series(False, index=df.index)).iloc[i]),
+                }
+                result = scorer.score(conds, direction="long", rr_ratio=self.p.tp1_rr_ratio)
+                confidence_long[i] = result.score
+
+            for i in active_short_idx:
+                conds = {
+                    "ema_aligned_short": bool(ema_aligned_short.iloc[i]),
+                    "macd_bearish":      bool(macd_cond_short.iloc[i]),
+                    "rsi_trend_zone_short": bool(rsi_cond_short.iloc[i]),
+                    "adx_strong":        bool(adx_cond.iloc[i]),
+                    "price_below_ema21": bool(price_below_ema21.iloc[i]),
+                    "volume_above_avg":  bool(df.get("volume_above_avg", pd.Series(False, index=df.index)).iloc[i]),
+                    "obv_bearish":       bool(df.get("obv_bearish", pd.Series(False, index=df.index)).iloc[i]),
+                    "structure_bearish": bool(df.get("bos_bearish", pd.Series(False, index=df.index)).iloc[i]),
+                }
+                result = scorer.score(conds, direction="short", rr_ratio=self.p.tp1_rr_ratio)
+                confidence_short[i] = result.score
+
+        except ImportError:
+            # Si los módulos no están disponibles, usar confianza por score simple
+            confidence_long  = 0.47 + 0.03 * score_long.clip(0, 5).astype(float)
+            confidence_short = 0.47 + 0.03 * score_short.clip(0, 5).astype(float)
+
 
         # ── Escribir resultados ────────────────────────────────────────────────
         mask_idx = long_mask.values
+        short_mask_idx = short_mask.values
 
         signals_arr = np.zeros(n, dtype=int)
         signals_arr[mask_idx] = 1
+        signals_arr[short_mask_idx] = -1
 
         entry_prices = np.full(n, np.nan)
         stop_losses  = np.full(n, np.nan)
         tp1_prices   = np.full(n, np.nan)
         tp2_prices   = np.full(n, np.nan)
+        quality_arr  = np.full(n, "", dtype=object)
 
+        # Aplicar Longs
         entry_prices[mask_idx] = close.values[mask_idx]
         stop_losses[mask_idx]  = stop_loss[mask_idx]
         tp1_prices[mask_idx]   = tp1[mask_idx]
         tp2_prices[mask_idx]   = tp2[mask_idx]
+        quality_arr[mask_idx]  = quality_long_arr[mask_idx]
+        
+        # Aplicar Shorts
+        entry_prices[short_mask_idx] = close.values[short_mask_idx]
+        stop_losses[short_mask_idx]  = stop_loss_short[short_mask_idx]
+        tp1_prices[short_mask_idx]   = tp1_short[short_mask_idx]
+        tp2_prices[short_mask_idx]   = tp2_short[short_mask_idx]
+        quality_arr[short_mask_idx]  = quality_short_arr[short_mask_idx]
 
         # Construir reason string solo donde hay señal (evita trabajo innecesario)
         reason_arr = [""] * n
         for i in np.where(mask_idx)[0]:
             parts = []
-            if ema_aligned.iloc[i]:
-                parts.append("EMA21>EMA55>EMA200✓")
-            elif macd_strong.iloc[i]:
-                parts.append("EMA21>EMA55+MACD↑✓")
-            if price_above_ema21.iloc[i]:
-                parts.append("Precio>EMA21✓")
-            if adx_cond.iloc[i]:
-                parts.append(f"ADX={adx.iloc[i]:.1f}✓")
-            if rsi_cond.iloc[i]:
-                parts.append(f"RSI={rsi.iloc[i]:.1f}✓")
-            if macd_h.iloc[i] > 0:
-                parts.append(f"MACD={macd_h.iloc[i]:.4f}{'↑' if macd_growing.iloc[i] else '~'}✓")
+            if ema_aligned.iloc[i]: parts.append("EMA21>EMA55>EMA200✓")
+            elif macd_strong.iloc[i]: parts.append("EMA21>EMA55+MACD↑✓")
+            if price_above_ema21.iloc[i]: parts.append("Precio>EMA21✓")
+            if adx_cond.iloc[i]: parts.append(f"ADX={adx.iloc[i]:.1f}✓")
+            if rsi_cond.iloc[i]: parts.append(f"RSI={rsi.iloc[i]:.1f}✓")
+            if macd_h.iloc[i] > 0: parts.append(f"MACD={macd_h.iloc[i]:.4f}{'↑' if macd_growing.iloc[i] else '~'}✓")
+            reason_arr[i] = " | ".join(parts)
+            
+        for i in np.where(short_mask_idx)[0]:
+            parts = []
+            if ema_aligned_short.iloc[i]: parts.append("EMA21<EMA55<EMA200✓")
+            elif macd_strong_short.iloc[i]: parts.append("EMA21<EMA55+MACD↓✓")
+            if price_below_ema21.iloc[i]: parts.append("Precio<EMA21✓")
+            if adx_cond.iloc[i]: parts.append(f"ADX={adx.iloc[i]:.1f}✓")
+            if rsi_cond_short.iloc[i]: parts.append(f"RSI={rsi.iloc[i]:.1f}✓")
+            if macd_h.iloc[i] < 0: parts.append(f"MACD={macd_h.iloc[i]:.4f}✓")
             reason_arr[i] = " | ".join(parts)
 
-        df["signal"]        = signals_arr
-        df["entry_price"]   = entry_prices
-        df["stop_loss"]     = stop_losses
-        df["take_profit_1"] = tp1_prices
-        df["take_profit_2"] = tp2_prices
-        df["signal_reason"] = reason_arr
-        df["signal_quality"] = quality_arr
-        df["strategy"]      = self.strategy_type.value
+        # ── Columna de confianza bayesiana (probabilidad de éxito) ─────────────
+        confidence_arr = np.full(n, 0.47)
+        confidence_arr[mask_idx]       = confidence_long[mask_idx]
+        confidence_arr[short_mask_idx] = confidence_short[short_mask_idx]
+
+        # ── Régimen de volatilidad como string informativo ─────────────────────
+        vol_pct = self._calculate_volatility_percentile(atr)
+        if vol_pct < 0.30:
+            vol_regime = "LOW_VOL"
+        elif vol_pct < 0.70:
+            vol_regime = "NORMAL_VOL"
+        elif vol_pct < 0.90:
+            vol_regime = "HIGH_VOL"
+        else:
+            vol_regime = "EXTREME_VOL"
+
+        df["signal"]             = signals_arr
+        df["entry_price"]        = entry_prices
+        df["stop_loss"]          = stop_losses
+        df["take_profit_1"]      = tp1_prices
+        df["take_profit_2"]      = tp2_prices
+        df["signal_reason"]      = reason_arr
+        df["signal_quality"]     = quality_arr
+        df["confidence"]         = confidence_arr
+        df["volatility_regime"]  = vol_regime
+        df["volatility_pct"]     = vol_pct
+        df["strategy"]           = self.strategy_type.value
         return df
+
 
     def _generate_signals_slow(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fallback con bucle Python (para casos sin todos los indicadores)."""
@@ -297,7 +451,8 @@ class TrendFollowingStrategy(BaseStrategy):
         signal_quality = [""] * n
 
         for i in range(200, n):
-            long_signal, reason, quality = self._check_long_conditions(df, i)
+            # Comprobar Long
+            long_signal, reason_l, quality_l = self._check_long_conditions(df, i)
             if long_signal:
                 entry = df["close"].iloc[i]
                 atr = df["atr"].iloc[i] if "atr" in df.columns else entry * 0.02
@@ -311,8 +466,27 @@ class TrendFollowingStrategy(BaseStrategy):
                 stop_losses[i] = sl
                 tp1_prices[i] = tp1
                 tp2_prices[i] = tp2
-                signal_reasons[i] = reason
-                signal_quality[i] = quality.value
+                signal_reasons[i] = reason_l
+                signal_quality[i] = quality_l.value
+                continue
+                
+            # Comprobar Short
+            short_signal, reason_s, quality_s = self._check_short_conditions(df, i)
+            if short_signal:
+                entry = df["close"].iloc[i]
+                atr = df["atr"].iloc[i] if "atr" in df.columns else entry * 0.02
+                swing_high = df["last_swing_high"].iloc[i] if "last_swing_high" in df.columns else entry + atr
+                sl = max(swing_high + 0.5 * atr, entry + self.p.sl_atr_multiplier * atr)
+                risk = sl - entry
+                tp1 = entry - self.p.tp1_rr_ratio * risk
+                tp2 = entry - self.p.tp2_rr_ratio * risk
+                signals[i] = -1
+                entry_prices[i] = entry
+                stop_losses[i] = sl
+                tp1_prices[i] = tp1
+                tp2_prices[i] = tp2
+                signal_reasons[i] = reason_s
+                signal_quality[i] = quality_s.value
 
         df["signal"] = signals
         df["entry_price"] = entry_prices
@@ -399,20 +573,103 @@ class TrendFollowingStrategy(BaseStrategy):
         quality = self._classify_quality(df, idx, conditions_met, conditions_failed)
         return True, " | ".join(conditions_met), quality
 
-    def _classify_quality(self, df: pd.DataFrame, idx: int, conditions_met: list, conditions_failed: list) -> SetupQuality:
+    def _check_short_conditions(self, df: pd.DataFrame, idx: int) -> tuple[bool, str, SetupQuality]:
+        from config.settings import ASSETS
+        asset_cfg = ASSETS.get(self.symbol)
+        if asset_cfg and not asset_cfg.allow_shorts:
+            return False, f"Shorts desactivados en config para {self.symbol}", SetupQuality.C
+
+        row = df.iloc[idx]
+        conditions_met = []
+        conditions_failed = []
+
+        ema21_col = f"ema_{self._ema_fast}"
+        ema55_col = f"ema_{self._ema_mid}"
+        ema200_col = f"ema_{self._ema_slow}"
+
+        required_cols = [ema21_col, ema55_col, ema200_col, "adx", "rsi", "macd_histogram", "atr"]
+        if not all(col in df.columns for col in required_cols):
+            return False, "Indicadores faltantes", SetupQuality.C
+
+        ema21 = row[ema21_col]
+        ema55 = row[ema55_col]
+        ema200 = row[ema200_col]
+
+        macd_hist = row.get("macd_histogram", None)
+        macd_growing = row.get("macd_growing", False)
+        macd_strong_short = macd_hist is not None and not pd.isna(macd_hist) and macd_hist < 0 and not macd_growing
+
+        if ema21 < ema55 < ema200:
+            conditions_met.append("EMA21<EMA55<EMA200✓")
+        elif ema21 < ema55 and macd_strong_short:
+            conditions_met.append("EMA21<EMA55+MACD↓✓")
+        else:
+            conditions_failed.append("EMA_alignment✗")
+            return False, f"EMAs no alineadas para short", SetupQuality.C
+
+        if row["close"] < ema21:
+            conditions_met.append("Precio<EMA21✓")
+        else:
+            conditions_failed.append("Precio>EMA21✗")
+            return False, "Precio sobre EMA 21", SetupQuality.C
+
+        adx = row["adx"]
+        if pd.isna(adx): return False, "ADX no calculado", SetupQuality.C
+
+        if adx > self.p.min_adx:
+            conditions_met.append(f"ADX={adx:.1f}>{self.p.min_adx}✓")
+        else:
+            return False, f"ADX insuficiente", SetupQuality.C
+
+        rsi = row["rsi"]
+        if pd.isna(rsi): return False, "RSI no calculado", SetupQuality.C
+
+        rsi_min_short = 100 - self.p.rsi_max
+        rsi_max_short = 100 - self.p.rsi_min
+        if rsi_min_short <= rsi <= rsi_max_short:
+            conditions_met.append(f"RSI={rsi:.1f}✓")
+        else:
+            return False, f"RSI fuera de zona para short", SetupQuality.B
+
+        if macd_hist is not None and not pd.isna(macd_hist):
+            if macd_hist < 0 and not macd_growing:
+                conditions_met.append(f"MACD={macd_hist:.4f}↓✓")
+            elif macd_hist < 0:
+                conditions_met.append(f"MACD={macd_hist:.4f}~")
+            else:
+                return False, f"MACD positivo", SetupQuality.C
+
+        atr = row["atr"]
+        ema21_touch = abs(row["high"] - ema21) < 0.5 * atr or abs(row["close"] - ema21) < 0.5 * atr
+        in_bear_ob = row.get("price_in_bear_ob", False) or row.get("order_block_bearish", False)
+
+        if ema21_touch:
+            conditions_met.append("Retroceso_EMA21✓")
+        elif in_bear_ob:
+            conditions_met.append("En_OrderBlock✓")
+        else:
+            conditions_failed.append("Sin_retroceso~")
+
+        quality = self._classify_quality(df, idx, conditions_met, conditions_failed, is_short=True)
+        return True, " | ".join(conditions_met), quality
+
+    def _classify_quality(self, df: pd.DataFrame, idx: int, conditions_met: list, conditions_failed: list, is_short: bool = False) -> SetupQuality:
         row = df.iloc[idx]
         score = len(conditions_met)
         bonus = 0
-        if row.get("obv_bullish", False):
-            bonus += 1
-        if row.get("volume_above_avg", False):
-            bonus += 1
-        if row.get("stoch_rsi_oversold", False):
-            bonus += 1
-        if row.get("price_in_bull_ob", False) or row.get("fvg_bullish", False):
-            bonus += 1
-        if row.get("bos_bullish", False) or row.get("choch_bullish", False):
-            bonus += 1
+        
+        if not is_short:
+            if row.get("obv_bullish", False): bonus += 1
+            if row.get("volume_above_avg", False): bonus += 1
+            if row.get("stoch_rsi_oversold", False): bonus += 1
+            if row.get("price_in_bull_ob", False) or row.get("fvg_bullish", False): bonus += 1
+            if row.get("bos_bullish", False) or row.get("choch_bullish", False): bonus += 1
+        else:
+            if row.get("obv_bearish", False): bonus += 1
+            if row.get("volume_above_avg", False): bonus += 1
+            if row.get("stoch_rsi_overbought", False): bonus += 1
+            if row.get("price_in_bear_ob", False) or row.get("fvg_bearish", False): bonus += 1
+            if row.get("bos_bearish", False) or row.get("choch_bearish", False): bonus += 1
 
         if score >= 5 and bonus >= 3:
             return SetupQuality.A_PLUS

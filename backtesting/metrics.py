@@ -315,3 +315,88 @@ def calculate_metrics(
 ) -> BacktestMetrics:
     """Wrapper a nivel de módulo para calcular métricas."""
     return BacktestMetrics.from_trades(trades_df, equity_df, initial_capital)
+
+
+def bootstrap_significance(
+    pnl_series: np.ndarray,
+    n_simulations: int = 1000,
+    confidence_level: float = 0.95,
+    min_trades: int = 15,
+) -> dict:
+    """
+    Test de significancia estadística mediante bootstrapping.
+
+    Genera N secuencias aleatorias mezclando el historial de PnL y calcula
+    el Profit Factor de cada una. El sistema tiene edge real si su PF observado
+    supera el percentil (confidence_level) de la distribución aleatoria.
+
+    Args:
+        pnl_series: Array de PnL en USD de cada trade
+        n_simulations: Número de simulaciones bootstrap (default: 1000)
+        confidence_level: Nivel de confianza (default: 0.95 → p < 0.05)
+        min_trades: Mínimo de trades para que el test sea informativo
+
+    Returns:
+        dict con: {
+            'significant': bool,       # ¿Hay edge estadístico real?
+            'p_value': float,          # p-value estimado
+            'observed_pf': float,      # Profit Factor real
+            'bootstrap_pf_p95': float, # Percentil 95 de la distribución aleatoria
+            'bootstrap_mean_pf': float,# Media de PFs aleatorios (≈ 1.0 esperado)
+            'n_simulations': int,
+            'n_trades': int,
+            'warning': str             # Advertencia si n_trades < min_trades
+        }
+    """
+    n = len(pnl_series)
+    warning = ""
+
+    if n < min_trades:
+        warning = (
+            f"Solo {n} trades — test no concluyente (mín. {min_trades}). "
+            f"Resultado informativo, no definitivo."
+        )
+
+    pnl = np.array(pnl_series, dtype=float)
+
+    # Profit Factor observado real
+    wins_real  = pnl[pnl > 0]
+    losses_real = np.abs(pnl[pnl < 0])
+    observed_pf = (
+        float(wins_real.sum()) / float(losses_real.sum())
+        if losses_real.sum() > 0 else float("inf")
+    )
+
+    # ── Bootstrap: permutar y calcular PF de cada secuencia aleatoria ─────────
+    bootstrap_pfs = np.zeros(n_simulations)
+    rng = np.random.default_rng(seed=42)   # Semilla fija para reproducibilidad
+
+    for i in range(n_simulations):
+        shuffled = rng.permutation(pnl)
+        w = shuffled[shuffled > 0]
+        l = np.abs(shuffled[shuffled < 0])
+        bootstrap_pfs[i] = float(w.sum()) / float(l.sum()) if l.sum() > 0 else float("inf")
+
+    # Filtrar infinitos para estadísticas
+    finite_bpf = bootstrap_pfs[np.isfinite(bootstrap_pfs)]
+    if len(finite_bpf) == 0:
+        finite_bpf = bootstrap_pfs
+
+    pf_percentile = float(np.percentile(finite_bpf, confidence_level * 100))
+    mean_bpf      = float(np.mean(finite_bpf))
+
+    # p-value: fracción de simulaciones con PF >= observado
+    p_value = float(np.mean(bootstrap_pfs >= observed_pf))
+    significant = p_value < (1.0 - confidence_level) and np.isfinite(observed_pf)
+
+    return {
+        "significant":       significant,
+        "p_value":           round(p_value, 4),
+        "observed_pf":       round(observed_pf, 3),
+        "bootstrap_pf_p95":  round(pf_percentile, 3),
+        "bootstrap_mean_pf": round(mean_bpf, 3),
+        "n_simulations":     n_simulations,
+        "n_trades":          n,
+        "warning":           warning,
+    }
+

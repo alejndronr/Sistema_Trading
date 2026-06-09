@@ -39,6 +39,8 @@ from config.settings import (
 )
 from risk.position_sizer import PositionSizer
 from risk.regime_filter import RegimeFilter
+from risk.signal_scorer import get_scorer
+from risk.ev_filter import get_ev_filter
 from strategies.signals import BaseStrategy, TrendFollowingStrategy
 
 logger = get_logger(__name__)
@@ -333,6 +335,10 @@ class BacktestResult:
     portfolio: Portfolio
     metrics: BacktestMetrics
     runtime_seconds: float
+    # ── Capas cuantitativas ─────────────────────────────────────────────
+    bootstrap_stats: dict = field(default_factory=dict)   # Capa 6: p-value
+    volatility_regime: str = "NORMAL_VOL"                 # Capa 3/5: régimen ATR
+    kelly_multiplier: float = 1.0                         # Capa 2: Kelly calibrado
 
     @property
     def total_return_pct(self) -> float:
@@ -360,17 +366,38 @@ class BacktestResult:
             f"Trades:  {self.total_trades}",
             f"",
             f"── Métricas Objetivo (Fase 1) ──",
-            f"Win Rate:      {m.win_rate*100:.1f}%  (objetivo: ≥45%) {'✅' if m.win_rate >= 0.45 else '❌'}",
-            f"Profit Factor: {m.profit_factor:.2f}   (objetivo: ≥1.5) {'✅' if m.profit_factor >= 1.5 else '❌'}",
-            f"Sharpe Ratio:  {m.sharpe_ratio_annual:.2f}   (objetivo: ≥1.0) {'✅' if m.sharpe_ratio_annual >= 1.0 else '❌'}",
-            f"Max Drawdown:  {m.max_drawdown_pct*100:.1f}%  (objetivo: ≤15%) {'✅' if m.max_drawdown_pct <= 0.15 else '❌'}",
+            f"Win Rate:      {m.win_rate*100:.1f}%  (objetivo: ≥45%) {'\u2705' if m.win_rate >= 0.45 else '\u274c'}",
+            f"Profit Factor: {m.profit_factor:.2f}   (objetivo: ≥1.5) {'\u2705' if m.profit_factor >= 1.5 else '\u274c'}",
+            f"Sharpe Ratio:  {m.sharpe_ratio_annual:.2f}   (objetivo: ≥1.0) {'\u2705' if m.sharpe_ratio_annual >= 1.0 else '\u274c'}",
+            f"Max Drawdown:  {m.max_drawdown_pct*100:.1f}%  (objetivo: ≤15%) {'\u2705' if m.max_drawdown_pct <= 0.15 else '\u274c'}",
             f"",
             f"── Métricas Adicionales ──",
             f"Expectancy:    ${m.expectancy:.2f}/trade",
             f"Avg R:         {m.avg_r_multiple:.2f}R",
             f"Max streak L:  {m.max_consecutive_losses}",
+        ]
+
+        # ── Sección cuantitativa ───────────────────────────────────────
+        if self.bootstrap_stats:
+            bs = self.bootstrap_stats
+            sig_icon = "\u2705" if bs.get("significant") else "\u26a0\ufe0f"
+            lines += [
+                f"",
+                f"── Análisis Estadístico (Bootstrap 1000x) ──",
+                f"Significancia:  {sig_icon} {'EDGE REAL (p<0.05)' if bs.get('significant') else 'NO SIGNIFICATIVO (posible suerte)'}",
+                f"p-value:        {bs.get('p_value', '?'):.4f}   (objetivo: <0.05)",
+                f"PF Observado:   {bs.get('observed_pf', '?'):.3f}",
+                f"PF Aleatorio P95: {bs.get('bootstrap_pf_p95', '?'):.3f}",
+            ]
+            if bs.get("warning"):
+                lines.append(f"\u26a0\ufe0f  {bs['warning']}")
+
+        lines += [
             f"",
-            f"PASA FASE 1: {'✅ SÍ' if self.passes_phase1_criteria() else '❌ NO'}",
+            f"Régimen Volatilidad: {self.volatility_regime}",
+            f"Kelly Multiplier:    {self.kelly_multiplier:.2f}x",
+            f"",
+            f"PASA FASE 1: {'\u2705 S\u00cd' if self.passes_phase1_criteria() else '\u274c NO'}",
             f"{'='*60}\n",
         ]
         return "\n".join(lines)
@@ -547,6 +574,33 @@ class BacktestEngine:
             except ValueError:
                 continue
 
+            # 6g.5 ── Filtro de Valor Esperado (EV) y Scoring Bayesiano ────────────
+            # Calcula la probabilidad bayesiana y el EV del setup.
+            # Rechaza trades que no tienen ventaja matemática demostrable.
+            try:
+                confidence = float(row.get("confidence", 0.47))
+                rr_tp1 = abs(tp1 - entry_price) / abs(entry_price - stop_loss) if abs(entry_price - stop_loss) > 0 else 2.0
+
+                ev_result = get_ev_filter().calculate(
+                    p_win=confidence,
+                    reward_r=rr_tp1,
+                )
+
+                if not ev_result.passes_filter:
+                    logger.debug(
+                        "trade_rejected_ev",
+                        symbol=symbol,
+                        reason=ev_result.rejection_reason,
+                        p_win=round(confidence, 3),
+                        ev=ev_result.expected_value_r,
+                        rr=round(rr_tp1, 2),
+                    )
+                    continue
+
+            except Exception:
+                # Si el filtro falla por cualquier razón, continuar sin filtrar
+                pass
+
             # 6h. Abrir posición
             direction = SignalDirection.LONG if signal == 1 else SignalDirection.SHORT
             trade_id = portfolio.open_position(
@@ -603,7 +657,46 @@ class BacktestEngine:
             initial_capital=self.initial_capital,
         )
 
+        # 8.5 ── Kelly: alimentar historial de R-múltiples al sizer ──────────────
+        # Esto permite que el Kelly Criterion se calibre con los resultados reales
+        # del backtest, reflejando el edge real del sistema en este activo.
+        if not trades_df.empty and "r_multiple" in trades_df.columns:
+            for r_val in trades_df["r_multiple"].values:
+                sizer.record_trade_result(float(r_val))
+            kelly_mult = sizer.kelly_fraction()
+            logger.info(
+                "kelly_calibrated",
+                symbol=symbol,
+                n_trades=len(trades_df),
+                kelly_multiplier=kelly_mult,
+                win_rate=round(metrics.win_rate * 100, 1),
+            )
+
+        # 8.6 ── Bootstrap Significance Test ──────────────────────────────────
+        # Verifica si los resultados son estadísticamente significativos
+        # o simplemente suerte en una secuencia aleatoria.
+        bootstrap_stats = {}
+        if not trades_df.empty and "pnl_usd" in trades_df.columns:
+            try:
+                from backtesting.metrics import bootstrap_significance
+                bootstrap_stats = bootstrap_significance(
+                    pnl_series=trades_df["pnl_usd"].values,
+                    n_simulations=1000,
+                )
+            except Exception:
+                pass
+
         runtime = time.time() - start_time
+
+        # Extraer régimen de volatilidad de la última vela con señal
+        vol_regime = "NORMAL_VOL"
+        if "volatility_regime" in df.columns:
+            vol_series = df["volatility_regime"].dropna()
+            if not vol_series.empty:
+                vol_regime = str(vol_series.iloc[-1])
+
+        kelly_mult_final = sizer.kelly_fraction()
+
         result = BacktestResult(
             symbol=symbol,
             strategy=strategy.strategy_type.value,
@@ -616,7 +709,11 @@ class BacktestEngine:
             portfolio=portfolio,
             metrics=metrics,
             runtime_seconds=runtime,
+            bootstrap_stats=bootstrap_stats,
+            volatility_regime=vol_regime,
+            kelly_multiplier=kelly_mult_final,
         )
+
 
         logger.info(
             "backtest_complete",
@@ -705,6 +802,7 @@ class BacktestEngine:
                 risk = entry - pos.stop_loss
                 if close >= entry + risk:
                     portfolio.update_stop_loss(trade_id, entry)
+
 
         elif direction == SignalDirection.SHORT:
             # Stop Loss al alza

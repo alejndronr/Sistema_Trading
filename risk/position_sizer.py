@@ -146,22 +146,83 @@ class DrawdownTracker:
 class PositionSizer:
     """
     Calcula el tamaño óptimo de posición según las reglas del prompt maestro.
+    Incorpora Kelly Criterion fraccional para ajuste dinámico del sizing.
     Thread-safe: cada instancia mantiene su propio estado.
     """
+
+    # ── Configuración Kelly ───────────────────────────────────────────────────
+    KELLY_FRACTION: float  = 0.25   # Cuarto-Kelly (conservador, estándar de fondos)
+    KELLY_LOOKBACK: int    = 30     # Trades para estimar Kelly dinámico
+    KELLY_MIN_TRADES: int  = 10     # Mínimo de trades para activar Kelly
 
     def __init__(self, initial_capital: float = RISK.initial_capital):
         self.capital = initial_capital
         self.drawdown_tracker = DrawdownTracker(initial_capital)
         self._open_positions: int = 0
+        # Historial rolling de R-múltiples para Kelly dinámico
+        self._trade_r_history: list = []
 
     def update_capital(self, new_capital: float, timestamp: Optional[datetime] = None) -> None:
         """Actualiza el capital tras cerrar una posición."""
         self.capital = new_capital
         self.drawdown_tracker.record_capital(new_capital, timestamp)
 
+    def record_trade_result(self, r_multiple: float) -> None:
+        """
+        Registra el resultado de un trade en R-múltiples para el cálculo Kelly.
+        Mantiene solo los últimos KELLY_LOOKBACK trades (rolling window).
+        """
+        self._trade_r_history.append(r_multiple)
+        if len(self._trade_r_history) > self.KELLY_LOOKBACK:
+            self._trade_r_history.pop(0)
+
+    def kelly_fraction(self) -> float:
+        """
+        Calcula el porcentaje óptimo de capital a arriesgar según Kelly Criterion.
+
+        Fórmula: Kelly% = (WR × AvgWin_R - LR × AvgLoss_R) / AvgWin_R
+        Se aplica el cuarto-Kelly (× 0.25) para máxima seguridad.
+
+        Devuelve 1.0 (sin ajuste) si no hay suficientes datos.
+        El resultado está capeado en [0.5, 2.0] para evitar extremos.
+        """
+        if len(self._trade_r_history) < self.KELLY_MIN_TRADES:
+            return 1.0   # Sin datos suficientes: usar sizing estándar
+
+        r_arr = [r for r in self._trade_r_history]
+        wins   = [r for r in r_arr if r > 0]
+        losses = [r for r in r_arr if r <= 0]
+
+        if not wins or not losses:
+            return 1.0
+
+        win_rate  = len(wins) / len(r_arr)
+        loss_rate = 1.0 - win_rate
+        avg_win_r = sum(wins) / len(wins)
+        avg_loss_r = abs(sum(losses) / len(losses))  # Positivo
+
+        if avg_win_r <= 0 or avg_loss_r <= 0:
+            return 1.0
+
+        # Kelly% = (WR × b - LR) / b  donde b = avg_win / avg_loss en R
+        b = avg_win_r / avg_loss_r
+        kelly_pct = (win_rate * b - loss_rate) / b
+
+        # Cuarto-Kelly para máxima robustez
+        fractional_kelly = kelly_pct * self.KELLY_FRACTION
+
+        # Normalizar como multiplicador del sizing estándar
+        # Kelly% / riesgo_base_pct da el multiplicador
+        base_risk_pct = RISK.get_risk_amount(self.capital) / self.capital
+        kelly_multiplier = fractional_kelly / base_risk_pct if base_risk_pct > 0 else 1.0
+
+        # Capear en [0.5, 2.0]: nunca reducir más del 50%, nunca doblar
+        return round(max(0.5, min(2.0, kelly_multiplier)), 3)
+
     def get_risk_amount(self, quality: SetupQuality = SetupQuality.A) -> float:
         """
-        Retorna el monto en riesgo según la escala de capital del prompt maestro.
+        Retorna el monto en riesgo según la escala de capital del prompt maestro,
+        ajustado dinámicamente por el Kelly Criterion.
 
         $0-$1,000:      $10 fijo (aprendizaje)
         $1,000-$5,000:  1%
@@ -169,14 +230,21 @@ class PositionSizer:
         $20,000+:       2%
 
         Setups A+: hasta 2x el riesgo base (nunca supera 2% del capital).
+        Kelly ajusta el resultado final (×0.5 a ×2.0 según historial).
         """
         base_risk = RISK.get_risk_amount(self.capital)
 
         if quality == SetupQuality.A_PLUS:
             # A+ puede usar hasta 2x, con cap en 2% del capital
-            return min(base_risk * 2, self.capital * 0.02)
+            base_risk = min(base_risk * 2, self.capital * 0.02)
 
-        return base_risk
+        # Ajuste Kelly dinámico
+        kelly_mult = self.kelly_fraction()
+        kelly_adjusted = base_risk * kelly_mult
+
+        # Límite absoluto: nunca más del 2% del capital
+        max_risk = self.capital * 0.02
+        return min(kelly_adjusted, max_risk)
 
     def calculate_position_size(
         self,

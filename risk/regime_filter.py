@@ -480,8 +480,84 @@ class RegimeFilter:
         return True, regime, f"Régimen: {regime.value}"
 
 
+    def detect_volatility_regime(
+        self,
+        df: pd.DataFrame,
+        lookback_candles: int = 540,  # ~90 días en 4H
+    ) -> dict:
+        """
+        Detecta el régimen estadístico de volatilidad usando el percentil
+        histórico del ATR. Complementa el análisis macro del CycleDetector.
+
+        Regímenes:
+          LOW_VOL    (ATR < P30): Compresión — esperar expansión, preferir Breakout
+          NORMAL_VOL (P30-P70):  Estable   — Trend Following óptimo
+          HIGH_VOL   (P70-P90):  Expansión — Mean Reversion (precios exagerados)
+          EXTREME_VOL (> P90):   Caos      — No operar, preservar capital
+
+        Returns:
+            dict con régimen, percentil ATR, multiplicador de sizing recomendado
+            y lista de estrategias preferidas para este régimen.
+        """
+        atr_col = "atr"
+        if atr_col not in df.columns:
+            return {
+                "regime": "NORMAL_VOL",
+                "atr_percentile": 0.5,
+                "sizing_multiplier": 1.0,
+                "preferred_strategies": ["trend_following", "mean_reversion"],
+                "warning": "ATR no disponible en DataFrame",
+            }
+
+        atr_series = df[atr_col].dropna().astype(float)
+        if len(atr_series) < 50:
+            return {
+                "regime": "NORMAL_VOL",
+                "atr_percentile": 0.5,
+                "sizing_multiplier": 1.0,
+                "preferred_strategies": ["trend_following", "mean_reversion"],
+                "warning": "Insuficientes datos ATR (<50 velas)",
+            }
+
+        window = atr_series.iloc[-lookback_candles:] if len(atr_series) > lookback_candles else atr_series
+        current_atr = float(atr_series.iloc[-1])
+        pct = float((window < current_atr).mean())
+
+        # Clasificación con tabla de trading strategies óptimas por régimen
+        if pct < 0.30:
+            regime       = "LOW_VOL"
+            sizing_mult  = 0.85      # Reducir un poco — movimientos pequeños
+            strategies   = ["breakout", "trend_following"]
+            description  = "Volatilidad comprimida — esperar expansión, preferir Breakout"
+        elif pct < 0.70:
+            regime       = "NORMAL_VOL"
+            sizing_mult  = 1.0       # Sizing estándar
+            strategies   = ["trend_following", "mean_reversion"]
+            description  = "Volatilidad normal — Trend Following óptimo"
+        elif pct < 0.90:
+            regime       = "HIGH_VOL"
+            sizing_mult  = 0.75      # Reducir riesgo — precios exagerados
+            strategies   = ["mean_reversion"]
+            description  = "Volatilidad expandida — Mean Reversion (reversión a media)"
+        else:
+            regime       = "EXTREME_VOL"
+            sizing_mult  = 0.0       # NO OPERAR
+            strategies   = []
+            description  = "Volatilidad extrema — preservar capital, no operar"
+
+        return {
+            "regime":               regime,
+            "atr_percentile":       round(pct, 4),
+            "current_atr":          round(current_atr, 6),
+            "sizing_multiplier":    sizing_mult,
+            "preferred_strategies": strategies,
+            "description":          description,
+        }
+
+
 def classify_regime(df: pd.DataFrame) -> str:
     """Wrapper a nivel de módulo para clasificar el régimen de mercado."""
     filter_instance = RegimeFilter()
     regime = filter_instance.detect_regime(df)
     return regime.value
+
