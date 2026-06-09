@@ -667,38 +667,28 @@ class BacktestEngine:
                     sizer.register_position_closed(trade.pnl_usd, timestamp)
                 return
 
-            # Verificar TP1 (50% a cerrar)
+            # Verificar TP1 (porcentaje configurable)
             if not pos.tp1_hit and high >= pos.take_profit_1:
+                # Obtener el porcentaje dinámico de configuración
+                strategy_config = getattr(STRATEGIES, pos.strategy, None)
+                close_pct = getattr(strategy_config, "tp1_close_pct", 0.5) if strategy_config else 0.5
+
                 trade = portfolio.close_position(
                     trade_id=trade_id,
                     exit_price=pos.take_profit_1,
                     exit_time=timestamp,
                     exit_reason="take_profit_1",
-                    size_fraction=0.5 if pos.strategy == StrategyType.MEAN_REVERSION.value else 0.3,
+                    size_fraction=close_pct,
                     slippage_pct=slippage,
                 )
                 if trade:
                     sizer.register_position_closed(trade.pnl_usd, timestamp)
-                    # Mover SL a breakeven
+                    # Mover SL a breakeven para asegurar la operación libre de riesgo
                     portfolio.update_stop_loss(trade_id, entry)
                 return
 
-            # TP2 con trailing stop
+            # TP2 (Take Profit Final)
             if pos.tp1_hit:
-                # Trailing stop usando EMA configurada
-                trailing_ema_period = getattr(STRATEGIES.trend_following, 'trailing_ema_period', 21)
-                trailing_ema_col = f"trend_ema_{trailing_ema_period}"
-                if trailing_ema_col not in row.index and f"ema_{trailing_ema_period}" in row.index:
-                    trailing_ema_col = f"ema_{trailing_ema_period}"
-                trailing_ema_val = row.get(trailing_ema_col)
-                
-                if trailing_ema_val is not None and not np.isnan(trailing_ema_val):
-                    # Trailing stop para LONG sube con la EMA (nunca baja)
-                    new_trailing_sl = trailing_ema_val
-                    # Solo actualizamos si el nuevo SL es mejor que el actual
-                    if new_trailing_sl > sl:
-                        portfolio.update_stop_loss(trade_id, new_trailing_sl)
-
                 if pos.take_profit_2 and high >= pos.take_profit_2:
                     trade = portfolio.close_position(
                         trade_id=trade_id,
@@ -732,30 +722,25 @@ class BacktestEngine:
 
             # TP1 (precio cae hasta TP1)
             if not pos.tp1_hit and low <= pos.take_profit_1:
+                strategy_config = getattr(STRATEGIES, pos.strategy, None)
+                close_pct = getattr(strategy_config, "tp1_close_pct", 0.5) if strategy_config else 0.5
+
                 trade = portfolio.close_position(
                     trade_id=trade_id,
                     exit_price=pos.take_profit_1,
                     exit_time=timestamp,
                     exit_reason="take_profit_1",
-                    size_fraction=0.5 if pos.strategy == StrategyType.MEAN_REVERSION.value else 0.3,
+                    size_fraction=close_pct,
                     slippage_pct=slippage,
                 )
                 if trade:
                     sizer.register_position_closed(trade.pnl_usd, timestamp)
+                    # Mover SL a breakeven
                     portfolio.update_stop_loss(trade_id, entry)
+                return
 
+            # TP2 (Take Profit Final)
             elif pos.tp1_hit:
-                trailing_ema_period = getattr(STRATEGIES.trend_following, 'trailing_ema_period', 21)
-                trailing_ema_col = f"trend_ema_{trailing_ema_period}"
-                if trailing_ema_col not in row.index and f"ema_{trailing_ema_period}" in row.index:
-                    trailing_ema_col = f"ema_{trailing_ema_period}"
-                trailing_ema_val = row.get(trailing_ema_col)
-                
-                if trailing_ema_val is not None and not np.isnan(trailing_ema_val):
-                    new_trailing_sl = trailing_ema_val
-                    if new_trailing_sl < sl:
-                        portfolio.update_stop_loss(trade_id, new_trailing_sl)
-
                 if pos.take_profit_2 and low <= pos.take_profit_2:
                     trade = portfolio.close_position(
                         trade_id=trade_id,
