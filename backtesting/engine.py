@@ -41,7 +41,7 @@ from risk.position_sizer import PositionSizer
 from risk.regime_filter import RegimeFilter
 from risk.signal_scorer import get_scorer
 from risk.ev_filter import get_ev_filter
-from strategies.signals import BaseStrategy, TrendFollowingStrategy
+from strategies.signals import BaseStrategy, TrendFollowingStrategy, MetaStrategy
 
 logger = get_logger(__name__)
 
@@ -1238,17 +1238,23 @@ def run_single_backtest(params: Dict[str, Any], dfs: Dict[str, pd.DataFrame], sy
     tf = params["timeframe"]
     df_train = dfs[tf]
     
-    # Mutar configuración global (seguro porque es un proceso hijo)
-    STRATEGIES.trend_following.min_adx = params["adx"]
-    STRATEGIES.trend_following.sl_atr_multiplier = params["sl_atr"]
-    STRATEGIES.trend_following.tp1_rr_ratio = params["tp1_rr"]
-    STRATEGIES.trend_following.trailing_ema_period = params["trailing_ema"]
+    # Mutar configuración global iterando el prefijo
+    for key, val in params.items():
+        if key == "timeframe" or key == "strategy": continue
+        if key.startswith("tf_"):
+            setattr(STRATEGIES.trend_following, key.replace("tf_", ""), val)
+        elif key.startswith("meta_"):
+            setattr(STRATEGIES.meta, key.replace("meta_", ""), val)
     
     # 2. Inicializar motor
     engine = BacktestEngine(initial_capital=BACKTEST.initial_capital if hasattr(BACKTEST, 'initial_capital') else 1000.0)
     
     # 3. Correr backtest silencioso
-    strategy = TrendFollowingStrategy(symbol, timeframe=tf, params=STRATEGIES.trend_following)
+    strat_name = params.get("strategy", "trend_following")
+    if strat_name == "meta":
+        strategy = MetaStrategy(symbol, timeframe=tf, params=STRATEGIES.meta)
+    else:
+        strategy = TrendFollowingStrategy(symbol, timeframe=tf, params=STRATEGIES.trend_following)
     
     result = engine.run(
         symbol=symbol,

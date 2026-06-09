@@ -4,7 +4,7 @@ pandas>=2.2.0                # DataFrame operations
 numpy>=1.26.0                # Numerical computing
 
 # ── Technical Indicators ───────────────────────────────────────────────────────
-pandas-ta>=0.3.14b           # 130+ indicators (RSI, MACD, BB, etc.)
+pandas-ta==0.3.14b0          # 130+ indicators (RSI, MACD, BB, etc.)
 ta>=0.11.0                   # Alternative TA library (fallback)
 
 # ── Database ───────────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ rich>=13.7.0                 # Beautiful terminal output
 
 # ── Reporting & Visualization ──────────────────────────────────────────────────
 plotly>=5.20.0               # Interactive charts for backtesting report
+streamlit>=1.35.0            # Dashboard web framework
+psutil>=5.9.0                # System resource monitoring (CPU, RAM, disk)
 jinja2>=3.1.0                # HTML report templating
 kaleido>=0.2.1               # Static image export for plots
 

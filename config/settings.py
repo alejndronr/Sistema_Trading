@@ -50,6 +50,7 @@ class StrategyType(Enum):
     TREND_FOLLOWING = "trend_following"
     MEAN_REVERSION = "mean_reversion"
     BREAKOUT = "breakout"
+    META = "meta"
 
 
 class SignalDirection(Enum):
@@ -278,10 +279,18 @@ class BreakoutParams:
 
 
 @dataclass
+class MetaStrategyParams:
+    """Parámetros para el orquestador MetaStrategy."""
+    hurst_trend_threshold: float = 0.55
+    hurst_range_threshold: float = 0.45
+    zscore_extreme: float = -2.0
+
+@dataclass
 class StrategyParams:
     trend_following: TrendFollowingParams = field(default_factory=TrendFollowingParams)
     mean_reversion: MeanReversionParams = field(default_factory=MeanReversionParams)
     breakout: BreakoutParams = field(default_factory=BreakoutParams)
+    meta: MetaStrategyParams = field(default_factory=MetaStrategyParams)
 
 
 STRATEGIES = StrategyParams()

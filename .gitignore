@@ -1,4 +1,4 @@
-﻿# Secretos — NUNCA subir
+# Secretos — NUNCA subir
 .env
 *.env
 
@@ -28,3 +28,8 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/
+

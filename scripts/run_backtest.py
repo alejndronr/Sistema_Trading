@@ -31,11 +31,13 @@ def get_strategy(strategy_name: str, symbol: str, timeframe: str):
         TrendFollowingStrategy,
         MeanReversionStrategy,
         BreakoutStrategy,
+        MetaStrategy,
     )
     strategies = {
         "trend_following": TrendFollowingStrategy,
         "mean_reversion": MeanReversionStrategy,
         "breakout": BreakoutStrategy,
+        "meta": MetaStrategy,
     }
 
     cls = strategies.get(strategy_name)
@@ -56,7 +58,7 @@ def main():
     parser.add_argument("--priority1", action="store_true", help="Solo pares Prioridad 1 (BTC+ETH)")
     parser.add_argument(
         "--strategy", default="trend_following",
-        choices=["trend_following", "mean_reversion", "breakout"],
+        choices=["trend_following", "mean_reversion", "breakout", "meta"],
         help="Estrategia a usar"
     )
     parser.add_argument("--timeframe", default="4h", help="Timeframe del backtest")

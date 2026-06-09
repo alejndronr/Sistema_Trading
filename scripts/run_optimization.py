@@ -36,13 +36,14 @@ def main():
         
     optimizer = HyperparameterOptimizer(dfs=dfs, symbol=args.symbol)
     
-    # Definir Parameter Space según prompt
+    # Definir Parameter Space según plan (Grid Atómico)
     param_grid = {
+        "strategy": ["meta"],
         "timeframe": ["4h"],
-        "adx": [20, 25],
-        "sl_atr": [1.5, 2.0],
-        "tp1_rr": [2.0, 3.0],
-        "trailing_ema": [21]
+        "meta_hurst_trend_threshold": [0.52, 0.55, 0.60],
+        "meta_hurst_range_threshold": [0.40, 0.45],
+        "tf_min_adx": [20.0, 25.0],
+        "tf_sl_atr_multiplier": [1.5, 2.0]
     }
     
     # 1. Optimizar In-Sample

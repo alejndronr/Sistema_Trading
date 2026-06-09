@@ -387,14 +387,14 @@ class RegimeFilter:
 
     def get_active_strategies(self, regime: MarketRegime) -> List[StrategyType]:
         if regime == MarketRegime.BULLISH_TREND:
-            return [StrategyType.TREND_FOLLOWING, StrategyType.MEAN_REVERSION]
+            return [StrategyType.TREND_FOLLOWING, StrategyType.MEAN_REVERSION, StrategyType.META]
         elif regime == MarketRegime.BEARISH_TREND:
-            return [StrategyType.TREND_FOLLOWING]
+            return [StrategyType.TREND_FOLLOWING, StrategyType.META]
         elif regime == MarketRegime.RANGE:
-            return [StrategyType.MEAN_REVERSION]
+            return [StrategyType.MEAN_REVERSION, StrategyType.META]
         elif regime == MarketRegime.HIGH_VOLATILITY:
-            return [StrategyType.TREND_FOLLOWING, StrategyType.BREAKOUT]
-        return []
+            return [StrategyType.TREND_FOLLOWING, StrategyType.BREAKOUT, StrategyType.META]
+        return [StrategyType.META]
 
     def get_position_size_multiplier(self, regime: MarketRegime) -> float:
         return 1.0

@@ -1158,3 +1158,148 @@ def apply_all_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["signal_trend"] = df["tf_long_signal"]
     df["signal"] = df["tf_long_signal"]  # Default
     return df
+
+class MetaStrategy(BaseStrategy):
+    """
+    Orquestador de múltiples estrategias basado en régimen de mercado cuantitativo.
+    """
+    def __init__(self, symbol: str, timeframe: str = "4h", params=None):
+        super().__init__(symbol, timeframe)
+        from config.settings import STRATEGIES
+        self.p = params if params else STRATEGIES.meta
+        self.tf = TrendFollowingStrategy(symbol, timeframe)
+        self.mr = MeanReversionStrategy(symbol, timeframe)
+        self.bo = BreakoutStrategy(symbol, timeframe)
+
+    @property
+    def strategy_type(self) -> StrategyType:
+        return StrategyType.META
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        
+        # Evaluate individual strategies
+        df_tf = self.tf.generate_signals(df)
+        df_mr = self.mr.generate_signals(df)
+        df_bo = self.bo.generate_signals(df)
+        
+        # Merge individual outputs
+        df["tf_sig"] = df_tf.get("signal", pd.Series(0, index=df.index))
+        df["mr_sig"] = df_mr.get("signal", pd.Series(0, index=df.index))
+        df["bo_sig"] = df_bo.get("signal", pd.Series(0, index=df.index))
+        
+        df["tf_sl"] = df_tf.get("stop_loss", pd.Series(np.nan, index=df.index))
+        df["mr_sl"] = df_mr.get("stop_loss", pd.Series(np.nan, index=df.index))
+        df["bo_sl"] = df_bo.get("stop_loss", pd.Series(np.nan, index=df.index))
+        
+        df["tf_tp1"] = df_tf.get("take_profit_1", pd.Series(np.nan, index=df.index))
+        df["mr_tp1"] = df_mr.get("take_profit_1", pd.Series(np.nan, index=df.index))
+        df["bo_tp1"] = df_bo.get("take_profit_1", pd.Series(np.nan, index=df.index))
+        
+        df["tf_tp2"] = df_tf.get("take_profit_2", pd.Series(np.nan, index=df.index))
+        df["mr_tp2"] = df_mr.get("take_profit_2", pd.Series(np.nan, index=df.index))
+        df["bo_tp2"] = df_bo.get("take_profit_2", pd.Series(np.nan, index=df.index))
+        
+        # Regime indicators
+        hurst = df.get("hurst_exp", pd.Series(0.5, index=df.index))
+        zscore = df.get("zscore_vwap", pd.Series(0.0, index=df.index))
+        
+        # Pre-allocate output arrays
+        n = len(df)
+        sig_out = np.zeros(n, dtype=int)
+        sl_out = np.full(n, np.nan)
+        tp1_out = np.full(n, np.nan)
+        tp2_out = np.full(n, np.nan)
+        regime_out = np.full(n, "unknown", dtype=object)
+        
+        h_arr = hurst.to_numpy()
+        z_arr = zscore.to_numpy()
+        
+        tf_s = df["tf_sig"].to_numpy()
+        mr_s = df["mr_sig"].to_numpy()
+        bo_s = df["bo_sig"].to_numpy()
+        
+        tf_sl = df["tf_sl"].to_numpy()
+        mr_sl = df["mr_sl"].to_numpy()
+        bo_sl = df["bo_sl"].to_numpy()
+        
+        tf_tp = df["tf_tp1"].to_numpy()
+        mr_tp = df["mr_tp1"].to_numpy()
+        bo_tp = df["bo_tp1"].to_numpy()
+
+        tf_tp2 = df["tf_tp2"].to_numpy()
+        mr_tp2 = df["mr_tp2"].to_numpy()
+        bo_tp2 = df["bo_tp2"].to_numpy()
+
+        for i in range(n):
+            if z_arr[i] < self.p.zscore_extreme and mr_s[i] != 0:
+                # Extremo: Mean Reversion absoluto
+                sig_out[i] = mr_s[i]
+                sl_out[i] = mr_sl[i]
+                tp1_out[i] = mr_tp[i]
+                tp2_out[i] = mr_tp2[i]
+                regime_out[i] = "mr_extreme"
+            elif h_arr[i] > self.p.hurst_trend_threshold:
+                # Tendencia
+                if bo_s[i] != 0:
+                    sig_out[i] = bo_s[i]
+                    sl_out[i] = bo_sl[i]
+                    tp1_out[i] = bo_tp[i]
+                    tp2_out[i] = bo_tp2[i]
+                    regime_out[i] = "breakout_trend"
+                elif tf_s[i] != 0:
+                    sig_out[i] = tf_s[i]
+                    sl_out[i] = tf_sl[i]
+                    tp1_out[i] = tf_tp[i]
+                    tp2_out[i] = tf_tp2[i]
+                    regime_out[i] = "trend_following"
+            elif h_arr[i] < self.p.hurst_range_threshold:
+                # Lateral
+                if mr_s[i] != 0:
+                    sig_out[i] = mr_s[i]
+                    sl_out[i] = mr_sl[i]
+                    tp1_out[i] = mr_tp[i]
+                    tp2_out[i] = mr_tp2[i]
+                    regime_out[i] = "mean_reversion_range"
+            else:
+                # Neutral: el primero que dispare
+                if tf_s[i] != 0:
+                    sig_out[i] = tf_s[i]
+                    sl_out[i] = tf_sl[i]
+                    tp1_out[i] = tf_tp[i]
+                    tp2_out[i] = tf_tp2[i]
+                    regime_out[i] = "trend_following_neutral"
+                elif bo_s[i] != 0:
+                    sig_out[i] = bo_s[i]
+                    sl_out[i] = bo_sl[i]
+                    tp1_out[i] = bo_tp[i]
+                    tp2_out[i] = bo_tp2[i]
+                    regime_out[i] = "breakout_neutral"
+                elif mr_s[i] != 0:
+                    sig_out[i] = mr_s[i]
+                    sl_out[i] = mr_sl[i]
+                    tp1_out[i] = mr_tp[i]
+                    tp2_out[i] = mr_tp2[i]
+                    regime_out[i] = "mr_neutral"
+
+        # Prevent multiple consecutive signals
+        for i in range(1, n):
+            if sig_out[i] and sig_out[max(0, i-3):i].any():
+                sig_out[i] = 0
+
+        df["signal_long"] = sig_out
+        df["signal"] = sig_out
+        df["entry_price"] = df["close"]
+        df["stop_loss"] = sl_out
+        df["take_profit_1"] = tp1_out
+        df["take_profit_2"] = tp2_out
+        df["meta_regime"] = regime_out
+        df["strategy"] = self.strategy_type.value
+        df["signal_reason"] = regime_out
+        df["signal_quality"] = "A"
+        df["confidence"] = 0.6
+        
+        return df
+
+    def is_valid_entry(self, df: pd.DataFrame, idx: int) -> bool:
+        return df["signal"].iloc[idx] == 1
