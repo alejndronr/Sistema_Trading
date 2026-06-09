@@ -236,23 +236,42 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_growing = macd_growing.astype(bool)
 
         # ── Máscaras vectorizadas para LONG ─────────────────────────────────────
+        # Enfoque estocástico/probabilístico en lugar de reglas booleanas rígidas.
+        ts_tstat         = df.get("ts_tstat", pd.Series(0.0, index=df.index)).astype(float)
+        prob_bull        = df.get("prob_bull", pd.Series(0.0, index=df.index)).astype(float)
+        hurst            = df.get("hurst_exponent", pd.Series(0.5, index=df.index)).astype(float)
+
         ema_aligned      = (ema21 > ema55) & (ema55 > ema200)
+        
+        # Condición Primaria Matemática:
+        # T-stat > 1.5 (Confianza estadística de momentum ~93%)
+        # Hurst > 0.52 (Mercado tendencial persistente, descarta random walk)
+        # Prob_Bull > 0.40 (Modelo GMM indica alta probabilidad de régimen alcista)
+        math_bull_cond   = (ts_tstat > 1.5) & (hurst > 0.52) & (prob_bull > 0.40)
+        
+        # Condición Clásica como Fallback o refuerzo:
         macd_strong      = (macd_h > 0) & macd_growing
         ema_cond         = ema_aligned | ((ema21 > ema55) & macd_strong)
+        
         price_above_ema21 = close > ema21
-        adx_cond         = adx > self.p.min_adx
         rsi_cond         = (rsi >= self.p.rsi_min) & (rsi <= self.p.rsi_max)
         macd_cond        = macd_h > 0
         
         warmup_mask = pd.Series(False, index=df.index)
         warmup_mask.iloc[200:] = True
 
-        long_mask = warmup_mask & ema_cond & price_above_ema21 & adx_cond & rsi_cond & macd_cond
+        # Combinamos el modelo matemático con la confirmación de momentum clásico
+        long_mask = warmup_mask & math_bull_cond & price_above_ema21 & rsi_cond & macd_cond
+
+        # Volatilidad dinámica (Expansión/Contracción GARCH)
+        vol_garch = df.get("vol_garch_proxy", pd.Series(1.0, index=df.index)).astype(float)
+        # Limitar el multiplicador GARCH entre 0.5 (muy comprimido) y 2.0 (muy expandido)
+        dynamic_atr = atr * np.clip(vol_garch, 0.5, 2.0)
 
         # ── Construir SL / TP vectorizados para LONG ──────────────────────────
-        swing_low = df["last_swing_low"].astype(float) if "last_swing_low" in df.columns else close - atr
-        sl_swing  = swing_low - 0.5 * atr
-        sl_atr    = close - self.p.sl_atr_multiplier * atr
+        swing_low = df["last_swing_low"].astype(float) if "last_swing_low" in df.columns else close - dynamic_atr
+        sl_swing  = swing_low - 0.5 * dynamic_atr
+        sl_atr    = close - self.p.sl_atr_multiplier * dynamic_atr
         stop_loss = np.minimum(sl_swing.values, sl_atr.values)
         risk      = close.values - stop_loss
         tp1       = close.values + self.p.tp1_rr_ratio * risk
@@ -263,7 +282,12 @@ class TrendFollowingStrategy(BaseStrategy):
         asset_cfg = ASSETS.get(self.symbol)
         allow_shorts = asset_cfg.allow_shorts if asset_cfg else True
 
+        prob_bear = df.get("prob_bear", pd.Series(0.0, index=df.index)).astype(float)
         ema_aligned_short = (ema21 < ema55) & (ema55 < ema200)
+
+        # Condición Primaria Matemática:
+        math_bear_cond = (ts_tstat < -1.5) & (hurst > 0.52) & (prob_bear > 0.40)
+
         macd_strong_short = (macd_h < 0) & (~macd_growing)
         ema_cond_short    = ema_aligned_short | ((ema21 < ema55) & macd_strong_short)
         price_below_ema21 = close < ema21
@@ -271,14 +295,14 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_cond_short   = macd_h < 0
 
         if allow_shorts:
-            short_mask = warmup_mask & ema_cond_short & price_below_ema21 & adx_cond & rsi_cond_short & macd_cond_short
+            short_mask = warmup_mask & math_bear_cond & price_below_ema21 & rsi_cond_short & macd_cond_short
         else:
             short_mask = pd.Series(False, index=df.index)
 
         # ── Construir SL / TP vectorizados para SHORT ─────────────────────────
-        swing_high = df["last_swing_high"].astype(float) if "last_swing_high" in df.columns else close + atr
-        sl_swing_short  = swing_high + 0.5 * atr
-        sl_atr_short    = close + self.p.sl_atr_multiplier * atr
+        swing_high = df["last_swing_high"].astype(float) if "last_swing_high" in df.columns else close + dynamic_atr
+        sl_swing_short  = swing_high + 0.5 * dynamic_atr
+        sl_atr_short    = close + self.p.sl_atr_multiplier * dynamic_atr
         stop_loss_short = np.maximum(sl_swing_short.values, sl_atr_short.values)
         risk_short      = stop_loss_short - close.values
         tp1_short       = close.values - self.p.tp1_rr_ratio * risk_short
@@ -296,8 +320,8 @@ class TrendFollowingStrategy(BaseStrategy):
             if bonus_col in df.columns:
                 bonus_short += df[bonus_col].astype(bool).astype(int).values
 
-        score_long = (ema_aligned.astype(int) + price_above_ema21.astype(int) + adx_cond.astype(int) + rsi_cond.astype(int) + macd_cond.astype(int)).values
-        score_short = (ema_aligned_short.astype(int) + price_below_ema21.astype(int) + adx_cond.astype(int) + rsi_cond_short.astype(int) + macd_cond_short.astype(int)).values
+        score_long = (ema_aligned.astype(int) + price_above_ema21.astype(int) + math_bull_cond.astype(int) + rsi_cond.astype(int) + macd_cond.astype(int)).values
+        score_short = (ema_aligned_short.astype(int) + price_below_ema21.astype(int) + math_bear_cond.astype(int) + rsi_cond_short.astype(int) + macd_cond_short.astype(int)).values
 
         quality_long_arr = np.where((score_long >= 5) & (bonus_long >= 3), "A+", np.where((score_long >= 5) & (bonus_long >= 1), "A", np.where(score_long >= 4, "B", "C")))
         quality_short_arr = np.where((score_short >= 5) & (bonus_short >= 3), "A+", np.where((score_short >= 5) & (bonus_short >= 1), "A", np.where(score_short >= 4, "B", "C")))
@@ -330,7 +354,7 @@ class TrendFollowingStrategy(BaseStrategy):
                     "ema_aligned":       bool(ema_aligned.iloc[i]),
                     "macd_bullish":      bool(macd_cond.iloc[i]),
                     "rsi_trend_zone":    bool(rsi_cond.iloc[i]),
-                    "adx_strong":        bool(adx_cond.iloc[i]),
+                    "math_bull_cond":    bool(math_bull_cond.iloc[i]),
                     "price_above_ema21": bool(price_above_ema21.iloc[i]),
                     "volume_above_avg":  bool(df.get("volume_above_avg", pd.Series(False, index=df.index)).iloc[i]),
                     "obv_bullish":       bool(df.get("obv_bullish", pd.Series(False, index=df.index)).iloc[i]),
@@ -344,7 +368,7 @@ class TrendFollowingStrategy(BaseStrategy):
                     "ema_aligned_short": bool(ema_aligned_short.iloc[i]),
                     "macd_bearish":      bool(macd_cond_short.iloc[i]),
                     "rsi_trend_zone_short": bool(rsi_cond_short.iloc[i]),
-                    "adx_strong":        bool(adx_cond.iloc[i]),
+                    "math_bear_cond":    bool(math_bear_cond.iloc[i]),
                     "price_below_ema21": bool(price_below_ema21.iloc[i]),
                     "volume_above_avg":  bool(df.get("volume_above_avg", pd.Series(False, index=df.index)).iloc[i]),
                     "obv_bearish":       bool(df.get("obv_bearish", pd.Series(False, index=df.index)).iloc[i]),
@@ -519,28 +543,27 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_growing = row.get("macd_growing", False)
         macd_strong = macd_hist is not None and not pd.isna(macd_hist) and macd_hist > 0 and macd_growing
 
-        if ema21 > ema55 > ema200:
+        ts_tstat = row.get("ts_tstat", 0.0)
+        hurst = row.get("hurst_exponent", 0.5)
+        prob_bull = row.get("prob_bull", 0.0)
+
+        math_bull_cond = (ts_tstat > 1.5) and (hurst > 0.52) and (prob_bull > 0.40)
+
+        if math_bull_cond:
+            conditions_met.append(f"Math_Trend✓ (T:{ts_tstat:.1f}, H:{hurst:.2f}, P:{prob_bull:.2f})")
+        elif ema21 > ema55 > ema200:
             conditions_met.append("EMA21>EMA55>EMA200✓")
         elif ema21 > ema55 and macd_strong:
             conditions_met.append("EMA21>EMA55+MACD↑✓")
         else:
-            conditions_failed.append("EMA_alignment✗")
-            return False, f"EMAs no alineadas", SetupQuality.C
+            conditions_failed.append("No_Trend_Math_Or_EMA✗")
+            return False, f"Sin Momentum Probabilístico ni EMAs", SetupQuality.C
 
         if row["close"] > ema21:
             conditions_met.append("Precio>EMA21✓")
         else:
             conditions_failed.append("Precio<EMA21✗")
             return False, "Precio bajo EMA 21", SetupQuality.C
-
-        adx = row["adx"]
-        if pd.isna(adx):
-            return False, "ADX no calculado", SetupQuality.C
-
-        if adx > self.p.min_adx:
-            conditions_met.append(f"ADX={adx:.1f}>{self.p.min_adx}✓")
-        else:
-            return False, f"ADX insuficiente", SetupQuality.C
 
         rsi = row["rsi"]
         if pd.isna(rsi):
@@ -599,27 +622,27 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_growing = row.get("macd_growing", False)
         macd_strong_short = macd_hist is not None and not pd.isna(macd_hist) and macd_hist < 0 and not macd_growing
 
-        if ema21 < ema55 < ema200:
+        ts_tstat = row.get("ts_tstat", 0.0)
+        hurst = row.get("hurst_exponent", 0.5)
+        prob_bear = row.get("prob_bear", 0.0)
+
+        math_bear_cond = (ts_tstat < -1.5) and (hurst > 0.52) and (prob_bear > 0.40)
+
+        if math_bear_cond:
+            conditions_met.append(f"Math_Trend_Short✓ (T:{ts_tstat:.1f}, H:{hurst:.2f}, P:{prob_bear:.2f})")
+        elif ema21 < ema55 < ema200:
             conditions_met.append("EMA21<EMA55<EMA200✓")
         elif ema21 < ema55 and macd_strong_short:
             conditions_met.append("EMA21<EMA55+MACD↓✓")
         else:
-            conditions_failed.append("EMA_alignment✗")
-            return False, f"EMAs no alineadas para short", SetupQuality.C
+            conditions_failed.append("No_Trend_Math_Or_EMA✗")
+            return False, f"Sin Momentum Probabilístico ni EMAs para short", SetupQuality.C
 
         if row["close"] < ema21:
             conditions_met.append("Precio<EMA21✓")
         else:
             conditions_failed.append("Precio>EMA21✗")
             return False, "Precio sobre EMA 21", SetupQuality.C
-
-        adx = row["adx"]
-        if pd.isna(adx): return False, "ADX no calculado", SetupQuality.C
-
-        if adx > self.p.min_adx:
-            conditions_met.append(f"ADX={adx:.1f}>{self.p.min_adx}✓")
-        else:
-            return False, f"ADX insuficiente", SetupQuality.C
 
         rsi = row["rsi"]
         if pd.isna(rsi): return False, "RSI no calculado", SetupQuality.C
@@ -708,80 +731,133 @@ class MeanReversionStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         n = len(df)
-        signals = np.zeros(n, dtype=int)
+
+        # ── Variables Vectorizadas ─────────────────────────────────────────────
+        close = df["close"].astype(float)
+        atr   = df.get("atr", close * 0.01).astype(float)
+        bb_lower = df.get("bb_lower", pd.Series(np.nan, index=df.index)).astype(float)
+        bb_upper = df.get("bb_upper", pd.Series(np.nan, index=df.index)).astype(float)
+        ema21 = df.get(f"ema_{self._ema_fast}", pd.Series(np.nan, index=df.index)).astype(float)
+
+        zscore = df.get("zscore_vwap", pd.Series(0.0, index=df.index)).astype(float)
+        vol_garch = df.get("vol_garch_proxy", pd.Series(1.0, index=df.index)).astype(float)
+        prob_range_lv = df.get("prob_range_lv", pd.Series(0.0, index=df.index)).astype(float)
+        prob_range_hv = df.get("prob_range_hv", pd.Series(0.0, index=df.index)).astype(float)
+        prob_range = prob_range_lv + prob_range_hv
+
+        # ── Máscaras vectorizadas para LONG ─────────────────────────────────────
+        math_mr_cond_long = (zscore < -2.0) & (vol_garch < 1.2) & (prob_range > 0.40)
+        price_in_bb_lower = close <= (bb_lower + 0.5 * atr)
+        
+        warmup_mask = pd.Series(False, index=df.index)
+        warmup_mask.iloc[100:] = True
+
+        long_mask = warmup_mask & math_mr_cond_long & price_in_bb_lower
+
+        # Construir SL / TP para LONG
+        sl_long = bb_lower - self.p.sl_atr_buffer * atr
+        tp1_long = ema21
+        tp2_long = bb_upper
+
+        # Filtrar trades con R/R negativo
+        valid_rr_long = (tp1_long > close) & (tp2_long > close)
+        long_mask = long_mask & valid_rr_long
+
+        # ── Máscaras vectorizadas para SHORT ────────────────────────────────────
+        from config.settings import ASSETS
+        asset_cfg = ASSETS.get(self.symbol)
+        allow_shorts = asset_cfg.allow_shorts if asset_cfg else True
+
+        math_mr_cond_short = (zscore > 2.0) & (vol_garch < 1.2) & (prob_range > 0.40)
+        price_in_bb_upper = close >= (bb_upper - 0.5 * atr)
+
+        if allow_shorts:
+            short_mask = warmup_mask & math_mr_cond_short & price_in_bb_upper
+            sl_short = bb_upper + self.p.sl_atr_buffer * atr
+            tp1_short = ema21
+            tp2_short = bb_lower
+            valid_rr_short = (tp1_short < close) & (tp2_short < close)
+            short_mask = short_mask & valid_rr_short
+        else:
+            short_mask = pd.Series(False, index=df.index)
+
+        # ── Escribir resultados ────────────────────────────────────────────────
+        mask_idx = long_mask.values
+        short_mask_idx = short_mask.values
+
+        signals_arr = np.zeros(n, dtype=int)
+        signals_arr[mask_idx] = 1
+        signals_arr[short_mask_idx] = -1
+
         entry_prices = np.full(n, np.nan)
-        stop_losses = np.full(n, np.nan)
-        tp1_prices = np.full(n, np.nan)
-        tp2_prices = np.full(n, np.nan)
-        signal_reasons = [""] * n
-        signal_quality = [""] * n
+        stop_losses  = np.full(n, np.nan)
+        tp1_prices   = np.full(n, np.nan)
+        tp2_prices   = np.full(n, np.nan)
+        reason_arr   = np.full(n, "", dtype=object)
+        quality_arr  = np.full(n, "C", dtype=object)
 
-        ema_55_1d = df["close"].ewm(span=1320, adjust=False).mean()
-        ema_200_1d = df["close"].ewm(span=4800, adjust=False).mean()
-
-        warmup = min(4800, len(df) // 2) if len(df) > 100 else 50
-
-        for i in range(warmup, n):
-            macro_bull = True
-            if len(df) > 4800:
-                macro_bull = ema_55_1d.iloc[i] > ema_200_1d.iloc[i]
+        # Aplicar Longs
+        entry_prices[mask_idx] = close.values[mask_idx]
+        stop_losses[mask_idx]  = sl_long.values[mask_idx]
+        tp1_prices[mask_idx]   = tp1_long.values[mask_idx]
+        tp2_prices[mask_idx]   = tp2_long.values[mask_idx]
+        
+        for i in np.where(mask_idx)[0]:
+            reason_arr[i] = f"ZScore_Extremo✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | Precio_en_BB_lower✓"
+            quality_arr[i] = self._classify_long_quality(df.iloc[i], 2).value
             
-            long_signal = False
-            if macro_bull:
-                long_signal, long_reason, long_quality = self._check_long_conditions(df, i)
+        # Aplicar Shorts
+        if allow_shorts:
+            entry_prices[short_mask_idx] = close.values[short_mask_idx]
+            stop_losses[short_mask_idx]  = sl_short.values[short_mask_idx]
+            tp1_prices[short_mask_idx]   = tp1_short.values[short_mask_idx]
+            tp2_prices[short_mask_idx]   = tp2_short.values[short_mask_idx]
             
-            if long_signal:
-                entry = df["close"].iloc[i]
-                atr = df["atr"].iloc[i] if not pd.isna(df["atr"].iloc[i]) else entry * 0.02
-                bb_lower = df["bb_lower"].iloc[i]
-                ema21 = df[f"ema_{self._ema_fast}"].iloc[i]
-                bb_upper = df["bb_upper"].iloc[i]
+            for i in np.where(short_mask_idx)[0]:
+                reason_arr[i] = f"ZScore_Extremo_Short✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | Precio_en_BB_upper✓"
+                quality_arr[i] = self._classify_short_quality(df.iloc[i], 2).value
 
-                sl = bb_lower - self.p.sl_atr_buffer * atr
-                tp1 = ema21
-                tp2 = bb_upper
+        # ── Confianza bayesiana / probabilística ───────────────────────────────
+        confidence_arr = np.full(n, 0.47)
+        # La confianza es proporcional al extremo del Z-Score
+        z_conf_long = np.clip(0.40 + abs(zscore.values[mask_idx]) * 0.05, 0.40, 0.85)
+        confidence_arr[mask_idx] = z_conf_long
+        
+        z_conf_short = np.clip(0.40 + abs(zscore.values[short_mask_idx]) * 0.05, 0.40, 0.85)
+        confidence_arr[short_mask_idx] = z_conf_short
 
-                if tp1 > entry and tp2 > entry:
-                    signals[i] = 1
-                    entry_prices[i] = entry
-                    stop_losses[i] = sl
-                    tp1_prices[i] = tp1
-                    tp2_prices[i] = tp2
-                    signal_reasons[i] = long_reason
-                    signal_quality[i] = long_quality.value
-
-        df["signal"] = signals
+        df["signal"] = signals_arr
         df["entry_price"] = entry_prices
         df["stop_loss"] = stop_losses
         df["take_profit_1"] = tp1_prices
         df["take_profit_2"] = tp2_prices
-        df["signal_reason"] = signal_reasons
-        df["signal_quality"] = signal_quality
+        df["signal_reason"] = reason_arr
+        df["signal_quality"] = quality_arr
+        df["confidence"] = confidence_arr
         df["strategy"] = self.strategy_type.value
         return df
 
     def _check_long_conditions(self, df: pd.DataFrame, idx: int) -> tuple[bool, str, SetupQuality]:
         row = df.iloc[idx]
         conditions = []
-        required = ["adx", "rsi", "bb_lower", "bb_upper", "stoch_rsi_k", "atr", f"ema_{self._ema_fast}"]
 
-        for col in required:
-            if col not in df.columns or pd.isna(row.get(col, float("nan"))):
-                return False, f"Columna faltante: {col}", SetupQuality.C
+        zscore = row.get("zscore_vwap", 0.0)
+        vol_garch = row.get("vol_garch_proxy", 1.0)
+        prob_range_lv = row.get("prob_range_lv", 0.0)
+        prob_range_hv = row.get("prob_range_hv", 0.0)
+        prob_range = prob_range_lv + prob_range_hv
 
-        adx = row["adx"]
-        if adx >= self.p.max_adx:
-            return False, f"ADX={adx:.1f} no es rango", SetupQuality.C
-        conditions.append(f"ADX={adx:.1f}<20✓")
+        # Condición Probabilística Primaria: Z-Score extremo + Volatilidad comprimida + Régimen de Rango
+        math_mr_cond = (zscore < -2.0) and (vol_garch < 1.2) and (prob_range > 0.40)
 
-        rsi = row["rsi"]
-        if rsi >= self.p.rsi_long_threshold:
-            return False, f"RSI={rsi:.1f} no sobreventa", SetupQuality.C
-        conditions.append(f"RSI={rsi:.1f}<35✓")
+        if math_mr_cond:
+            conditions.append(f"ZScore_Extremo✓ (Z:{zscore:.2f}, VolG:{vol_garch:.2f}, P_Rng:{prob_range:.2f})")
+        else:
+            return False, "Sin condición Z-Score para Mean Reversion", SetupQuality.C
 
         close = row["close"]
-        bb_lower = row["bb_lower"]
-        atr = row["atr"]
+        bb_lower = row.get("bb_lower", 0.0)
+        atr = row.get("atr", close * 0.01)
         if close > bb_lower + 0.5 * atr:
             return False, "Precio no en banda inferior BB", SetupQuality.C
         conditions.append("Precio_en_BB_lower✓")
@@ -809,24 +885,24 @@ class MeanReversionStrategy(BaseStrategy):
     def _check_short_conditions(self, df: pd.DataFrame, idx: int) -> tuple[bool, str, SetupQuality]:
         row = df.iloc[idx]
         conditions = []
-        required = ["adx", "rsi", "bb_upper", "stoch_rsi_k", "atr"]
-        for col in required:
-            if col not in df.columns or pd.isna(row.get(col, float("nan"))):
-                return False, f"Columna faltante: {col}", SetupQuality.C
 
-        adx = row["adx"]
-        if adx >= self.p.max_adx:
-            return False, f"ADX={adx:.1f}", SetupQuality.C
-        conditions.append(f"ADX={adx:.1f}<20✓")
+        zscore = row.get("zscore_vwap", 0.0)
+        vol_garch = row.get("vol_garch_proxy", 1.0)
+        prob_range_lv = row.get("prob_range_lv", 0.0)
+        prob_range_hv = row.get("prob_range_hv", 0.0)
+        prob_range = prob_range_lv + prob_range_hv
 
-        rsi = row["rsi"]
-        if rsi <= self.p.rsi_short_threshold:
-            return False, f"RSI={rsi:.1f} no sobrecompra", SetupQuality.C
-        conditions.append(f"RSI={rsi:.1f}>65✓")
+        # Condición Probabilística Primaria para Short: Z-Score positivo extremo
+        math_mr_cond = (zscore > 2.0) and (vol_garch < 1.2) and (prob_range > 0.40)
+
+        if math_mr_cond:
+            conditions.append(f"ZScore_Extremo_Short✓ (Z:{zscore:.2f}, VolG:{vol_garch:.2f}, P_Rng:{prob_range:.2f})")
+        else:
+            return False, "Sin condición Z-Score para Mean Reversion Short", SetupQuality.C
 
         close = row["close"]
-        bb_upper = row["bb_upper"]
-        atr = row["atr"]
+        bb_upper = row.get("bb_upper", 0.0)
+        atr = row.get("atr", close * 0.01)
         if close < bb_upper - 0.5 * atr:
             return False, "Precio no en banda superior BB", SetupQuality.C
         conditions.append("Precio_en_BB_upper✓")
@@ -904,133 +980,134 @@ class BreakoutStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         n = len(df)
-        signals = np.zeros(n, dtype=int)
+
+        # ── Variables Vectorizadas ─────────────────────────────────────────────
+        close = df["close"].astype(float)
+        atr   = df.get("atr", close * 0.01).astype(float)
+        
+        # Volatilidad dinámica (Expansión de varianza esperada)
+        vol_garch = df.get("vol_garch_proxy", pd.Series(1.0, index=df.index)).astype(float)
+        
+        # Anomalía de Volumen (Proxy de test de Poisson)
+        vol_ratio = df.get("volume_ratio", pd.Series(1.0, index=df.index)).astype(float)
+        
+        # Z-Score para confirmar salida del intervalo de confianza del 95%
+        zscore = df.get("zscore_vwap", pd.Series(0.0, index=df.index)).astype(float)
+        
+        bb_upper = df.get("bb_upper", pd.Series(np.nan, index=df.index)).astype(float)
+        bb_lower = df.get("bb_lower", pd.Series(np.nan, index=df.index)).astype(float)
+        prev_bb_upper = bb_upper.shift(1)
+        prev_bb_lower = bb_lower.shift(1)
+        
+        bb_squeeze_candles = df.get("bb_squeeze_candles", pd.Series(0, index=df.index)).astype(int)
+
+        # ── Máscaras vectorizadas para LONG (Bullish Breakout) ───────────────────
+        # Ruptura estadísticamente significativa: 
+        # Z-Score > 1.8 (Cerca o fuera de 2 desviaciones) + Expansión Varianza + Anomalía Volumen
+        math_bull_breakout = (zscore > 1.8) & (vol_garch > 1.5) & (vol_ratio > self.p.volume_multiplier)
+        
+        # Condición mecánica (El precio rompe físicamente la banda y veníamos de compresión)
+        mechanical_bull = (close > prev_bb_upper) & (bb_squeeze_candles.shift(1) >= self.p.min_squeeze_candles)
+        
+        warmup_mask = pd.Series(False, index=df.index)
+        warmup_mask.iloc[100:] = True
+
+        long_mask = warmup_mask & math_bull_breakout & mechanical_bull
+
+        # SL / TP para LONG
+        sl_long = prev_bb_upper - self.p.sl_atr_multiplier * atr
+        risk_long = close - sl_long
+        tp1_long = close + 2.0 * risk_long
+        tp2_long = close + 4.0 * risk_long
+
+        # ── Máscaras vectorizadas para SHORT (Bearish Breakout) ──────────────────
+        from config.settings import ASSETS
+        asset_cfg = ASSETS.get(self.symbol)
+        allow_shorts = asset_cfg.allow_shorts if asset_cfg else True
+
+        math_bear_breakout = (zscore < -1.8) & (vol_garch > 1.5) & (vol_ratio > self.p.volume_multiplier)
+        mechanical_bear = (close < prev_bb_lower) & (bb_squeeze_candles.shift(1) >= self.p.min_squeeze_candles)
+
+        if allow_shorts:
+            short_mask = warmup_mask & math_bear_breakout & mechanical_bear
+            sl_short = prev_bb_lower + self.p.sl_atr_multiplier * atr
+            risk_short = sl_short - close
+            tp1_short = close - 2.0 * risk_short
+            tp2_short = close - 4.0 * risk_short
+        else:
+            short_mask = pd.Series(False, index=df.index)
+
+        # ── Escribir resultados ────────────────────────────────────────────────
+        mask_idx = long_mask.values
+        short_mask_idx = short_mask.values
+
+        signals_arr = np.zeros(n, dtype=int)
+        signals_arr[mask_idx] = 1
+        signals_arr[short_mask_idx] = -1
+
         entry_prices = np.full(n, np.nan)
-        stop_losses = np.full(n, np.nan)
-        tp1_prices = np.full(n, np.nan)
-        tp2_prices = np.full(n, np.nan)
-        signal_reasons = [""] * n
-        signal_quality = [""] * n
+        stop_losses  = np.full(n, np.nan)
+        tp1_prices   = np.full(n, np.nan)
+        tp2_prices   = np.full(n, np.nan)
+        reason_arr   = np.full(n, "", dtype=object)
+        quality_arr  = np.full(n, "B", dtype=object)
 
-        for i in range(50, n):
-            bull_signal, bull_reason, bull_quality = self._check_bullish_breakout(df, i)
-            bear_signal, bear_reason, bear_quality = self._check_bearish_breakout(df, i)
+        # Aplicar Longs
+        entry_prices[mask_idx] = close.values[mask_idx]
+        stop_losses[mask_idx]  = sl_long.values[mask_idx]
+        tp1_prices[mask_idx]   = tp1_long.values[mask_idx]
+        tp2_prices[mask_idx]   = tp2_long.values[mask_idx]
+        
+        for i in np.where(mask_idx)[0]:
+            sq_cand = bb_squeeze_candles.iloc[i-1]
+            vr = vol_ratio.iloc[i]
+            reason_arr[i] = f"StatBreakout✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}) | Squeeze({sq_cand}) | Vol_Anomaly={vr:.1f}x"
+            quality_arr[i] = "A+" if vr >= 2.5 else "A"
+            
+        # Aplicar Shorts
+        if allow_shorts:
+            entry_prices[short_mask_idx] = close.values[short_mask_idx]
+            stop_losses[short_mask_idx]  = sl_short.values[short_mask_idx]
+            tp1_prices[short_mask_idx]   = tp1_short.values[short_mask_idx]
+            tp2_prices[short_mask_idx]   = tp2_short.values[short_mask_idx]
+            
+            for i in np.where(short_mask_idx)[0]:
+                sq_cand = bb_squeeze_candles.iloc[i-1]
+                vr = vol_ratio.iloc[i]
+                reason_arr[i] = f"StatBreakoutShort✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}) | Squeeze({sq_cand}) | Vol_Anomaly={vr:.1f}x"
+                quality_arr[i] = "A+" if vr >= 2.5 else "A"
 
-            entry = df["close"].iloc[i]
-            atr = df["atr"].iloc[i] if "atr" in df.columns and not pd.isna(df["atr"].iloc[i]) else entry * 0.02
+        # ── Confianza bayesiana / probabilística ───────────────────────────────
+        confidence_arr = np.full(n, 0.47)
+        
+        # En breakout, la confianza la da la fuerza de la anomalía de volumen y varianza
+        vol_score_long = np.clip((vol_garch.values[mask_idx] - 1.5) * 0.1 + (vol_ratio.values[mask_idx] - 1.5) * 0.1, 0, 0.4)
+        confidence_arr[mask_idx] = np.clip(0.50 + vol_score_long, 0.50, 0.90)
+        
+        vol_score_short = np.clip((vol_garch.values[short_mask_idx] - 1.5) * 0.1 + (vol_ratio.values[short_mask_idx] - 1.5) * 0.1, 0, 0.4)
+        confidence_arr[short_mask_idx] = np.clip(0.50 + vol_score_short, 0.50, 0.90)
 
-            if bull_signal:
-                breakout_level = df["bb_upper"].iloc[i - 1] if "bb_upper" in df.columns else entry - atr
-                sl = breakout_level - self.p.sl_atr_multiplier * atr
-                risk = entry - sl
-                tp1 = entry + 2.0 * risk
-                tp2 = entry + 4.0 * risk
-                signals[i] = 1
-                entry_prices[i] = entry
-                stop_losses[i] = sl
-                tp1_prices[i] = tp1
-                tp2_prices[i] = tp2
-                signal_reasons[i] = bull_reason
-                signal_quality[i] = bull_quality.value
-
-            elif bear_signal:
-                breakout_level = df["bb_lower"].iloc[i - 1] if "bb_lower" in df.columns else entry + atr
-                sl = breakout_level + self.p.sl_atr_multiplier * atr
-                risk = sl - entry
-                tp1 = entry - 2.0 * risk
-                tp2 = entry - 4.0 * risk
-                signals[i] = -1
-                entry_prices[i] = entry
-                stop_losses[i] = sl
-                tp1_prices[i] = tp1
-                tp2_prices[i] = tp2
-                signal_reasons[i] = bear_reason
-                signal_quality[i] = bear_quality.value
-
-        df["signal"] = signals
+        df["signal"] = signals_arr
         df["entry_price"] = entry_prices
         df["stop_loss"] = stop_losses
         df["take_profit_1"] = tp1_prices
         df["take_profit_2"] = tp2_prices
-        df["signal_reason"] = signal_reasons
-        df["signal_quality"] = signal_quality
+        df["signal_reason"] = reason_arr
+        df["signal_quality"] = quality_arr
+        df["confidence"] = confidence_arr
         df["strategy"] = self.strategy_type.value
         return df
 
-    def _check_bullish_breakout(self, df: pd.DataFrame, idx: int) -> tuple[bool, str, SetupQuality]:
-        row = df.iloc[idx]
-        prev = df.iloc[idx - 1]
-        conditions = []
-        required = ["bb_squeeze_candles", "volume_ratio", "bb_upper"]
-        for col in required:
-            if col not in df.columns:
-                return False, f"Columna faltante: {col}", SetupQuality.C
-
-        squeeze_candles = row.get("bb_squeeze_candles", 0)
-        if squeeze_candles < self.p.min_squeeze_candles:
-            return False, f"Squeeze insuficiente: {squeeze_candles}", SetupQuality.C
-
-        was_in_squeeze = prev.get("bb_squeeze", False)
-        broke_upper = row["close"] > prev["bb_upper"]
-        if not (was_in_squeeze and broke_upper):
-            return False, "No hay ruptura", SetupQuality.C
-        conditions.append(f"Squeeze_release({squeeze_candles}velas)✓")
-
-        vol_ratio = row.get("volume_ratio", 0)
-        if vol_ratio < self.p.volume_multiplier:
-            return False, f"Volumen insuficiente: {vol_ratio:.1f}x", SetupQuality.C
-        conditions.append(f"Volumen={vol_ratio:.1f}x✓")
-
-        if self.p.wait_for_retest:
-            price_near_breakout = abs(row["close"] - prev["bb_upper"]) < row.get("atr", row["close"] * 0.02)
-            if price_near_breakout:
-                conditions.append("Retesteo✓")
-
-        if row.get("bos_bullish", False):
-            conditions.append("BOS_alcista✓")
-
-        if vol_ratio >= 2.5:
-            quality = SetupQuality.A_PLUS
-        elif vol_ratio >= 1.75 and len(conditions) >= 3:
-            quality = SetupQuality.A
-        else:
-            quality = SetupQuality.B
-        return True, " | ".join(conditions), quality
-
-    def _check_bearish_breakout(self, df: pd.DataFrame, idx: int) -> tuple[bool, str, SetupQuality]:
-        row = df.iloc[idx]
-        prev = df.iloc[idx - 1]
-        conditions = []
-        required = ["bb_squeeze_candles", "volume_ratio", "bb_lower"]
-        for col in required:
-            if col not in df.columns:
-                return False, f"Columna faltante: {col}", SetupQuality.C
-
-        squeeze_candles = row.get("bb_squeeze_candles", 0)
-        if squeeze_candles < self.p.min_squeeze_candles:
-            return False, f"Squeeze insuficiente", SetupQuality.C
-
-        was_in_squeeze = prev.get("bb_squeeze", False)
-        broke_lower = row["close"] < prev["bb_lower"]
-        if not (was_in_squeeze and broke_lower):
-            return False, "No hay ruptura", SetupQuality.C
-        conditions.append(f"Squeeze_release({squeeze_candles})✓")
-
-        vol_ratio = row.get("volume_ratio", 0)
-        if vol_ratio < self.p.volume_multiplier:
-            return False, f"Volumen insuficiente", SetupQuality.C
-        conditions.append(f"Volumen={vol_ratio:.1f}x✓")
-
-        if row.get("bos_bearish", False):
-            conditions.append("BOS_bajista✓")
-
-        quality = SetupQuality.A_PLUS if vol_ratio >= 2.5 else (SetupQuality.A if len(conditions) >= 3 else SetupQuality.B)
-        return True, " | ".join(conditions), quality
-
     def is_valid_entry(self, df: pd.DataFrame, idx: int) -> bool:
-        bull_valid, _, _ = self._check_bullish_breakout(df, idx)
-        bear_valid, _, _ = self._check_bearish_breakout(df, idx)
-        return bull_valid or bear_valid
+        row = df.iloc[idx]
+        zscore = row.get("zscore_vwap", 0.0)
+        vol_garch = row.get("vol_garch_proxy", 1.0)
+        vol_ratio = row.get("volume_ratio", 1.0)
+        
+        valid_bull = (zscore > 1.8) and (vol_garch > 1.5) and (vol_ratio > self.p.volume_multiplier)
+        valid_bear = (zscore < -1.8) and (vol_garch > 1.5) and (vol_ratio > self.p.volume_multiplier)
+        
+        return valid_bull or valid_bear
 
 # ── Funciones Vectorizadas para apply_all_signals ─────────────────────────────
 

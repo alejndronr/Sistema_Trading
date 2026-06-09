@@ -208,9 +208,9 @@ class TestPositionSizer:
         self.sizer = PositionSizer(initial_capital=300.0)
 
     def test_risk_amount_fixed_below_1000(self):
-        """Capital < $1000 → riesgo fijo de $10"""
+        """Capital < $1000 -> riesgo fijo de $10, capado al 2% ($6 para $300)"""
         risk = self.sizer.get_risk_amount()
-        assert risk == 10.0
+        assert risk == 6.0
 
     def test_position_size_formula(self):
         """Verifica la fórmula: size = risk / (entry - sl)"""

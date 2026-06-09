@@ -219,7 +219,7 @@ class PositionSizer:
         # Capear en [0.5, 2.0]: nunca reducir más del 50%, nunca doblar
         return round(max(0.5, min(2.0, kelly_multiplier)), 3)
 
-    def get_risk_amount(self, quality: SetupQuality = SetupQuality.A) -> float:
+    def get_risk_amount(self, quality: SetupQuality = SetupQuality.A, confidence: float = 0.5) -> float:
         """
         Retorna el monto en riesgo según la escala de capital del prompt maestro,
         ajustado dinámicamente por el Kelly Criterion.
@@ -238,8 +238,16 @@ class PositionSizer:
             # A+ puede usar hasta 2x, con cap en 2% del capital
             base_risk = min(base_risk * 2, self.capital * 0.02)
 
-        # Ajuste Kelly dinámico
-        kelly_mult = self.kelly_fraction()
+        # Proxy de Kelly basado en Confidence (Score Bayesiano)
+        # Confidence va de ~0.40 a 0.95. 0.5 = neutro (1x). 0.8+ = agresivo (hasta 2x).
+        kelly_confidence_mult = max(0.5, min(2.0, confidence * 2.0))
+
+        # Ajuste Kelly dinámico basado en historial
+        kelly_history_mult = self.kelly_fraction()
+        
+        # Combinamos ambos (promedio)
+        kelly_mult = (kelly_confidence_mult + kelly_history_mult) / 2.0
+        
         kelly_adjusted = base_risk * kelly_mult
 
         # Límite absoluto: nunca más del 2% del capital
@@ -253,6 +261,7 @@ class PositionSizer:
         quality: SetupQuality = SetupQuality.A,
         symbol_priority: int = 1,
         regime_multiplier: float = 1.0,
+        confidence: float = 0.5,
     ) -> Dict:
         """
         Calcula el tamaño de posición completo.
@@ -264,7 +273,7 @@ class PositionSizer:
         if price_diff <= 0:
             raise ValueError("Diferencia precio-SL debe ser > 0")
 
-        risk_amount = self.get_risk_amount(quality) * regime_multiplier
+        risk_amount = self.get_risk_amount(quality, confidence) * regime_multiplier
 
         # Position Size = Riesgo / (Entrada - SL)
         position_size = risk_amount / price_diff

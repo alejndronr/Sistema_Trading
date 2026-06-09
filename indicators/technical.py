@@ -132,6 +132,54 @@ def _ts_momentum(close: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Seri
     t_stat = slope / (close.rolling(period).std() / np.sqrt(period))
     return slope.fillna(0.0), t_stat.fillna(0.0)
 
+def _regime_hmm_proxy(close: pd.Series, atr: pd.Series, period: int = 60) -> pd.DataFrame:
+    """
+    Proxy de Hidden Markov Model / Gaussian Mixture.
+    Devuelve la probabilidad continua (0.0 - 1.0) de pertenecer a 4 regímenes:
+    bull_trend, bear_trend, high_vol_range, low_vol_range.
+    """
+    ret = close.pct_change()
+    
+    # 1. Componentes de distribución
+    ret_mean = ret.rolling(period).mean()
+    ret_std  = ret.rolling(period).std().replace(0, np.nan)
+    
+    # Normalizamos el retorno medio y la volatilidad (Z-Scores empíricos cortos)
+    z_ret = ret_mean / (ret_std / np.sqrt(period))
+    z_ret = z_ret.fillna(0)
+    
+    atr_norm = atr / close
+    atr_mean = atr_norm.rolling(period*3).mean()
+    atr_std  = atr_norm.rolling(period*3).std().replace(0, np.nan)
+    z_vol = (atr_norm - atr_mean) / atr_std
+    z_vol = z_vol.fillna(0)
+    
+    # 2. Funciones de Activación Probabilística (Sigmoid)
+    prob_bull = 1 / (1 + np.exp(-(z_ret - 1.0)))  
+    prob_bear = 1 / (1 + np.exp(z_ret + 1.0))
+    prob_range = 1.0 - np.maximum(prob_bull, prob_bear)
+    
+    # Separación por Volatilidad
+    prob_high_vol = 1 / (1 + np.exp(-(z_vol - 0.5))) 
+    prob_low_vol  = 1.0 - prob_high_vol
+    
+    # 3. Probabilidades Conjuntas
+    p_bull = prob_bull
+    p_bear = prob_bear
+    p_range_hv = prob_range * prob_high_vol
+    p_range_lv = prob_range * prob_low_vol
+    
+    # 4. Normalización (Softmax sum=1.0)
+    total = p_bull + p_bear + p_range_hv + p_range_lv
+    total = total.replace(0, np.nan)
+    
+    return pd.DataFrame({
+        "prob_bull": p_bull / total,
+        "prob_bear": p_bear / total,
+        "prob_range_hv": p_range_hv / total,
+        "prob_range_lv": p_range_lv / total
+    }).fillna(0.25)
+
 
 # ── Capa V5 Clases ────────────────────────────────────────────────────────────
 
@@ -1373,6 +1421,28 @@ def apply_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_21"]  = df["ema21"]
     df["ema_55"]  = df["ema55"]
     df["ema_200"] = df["ema200"]
+
+    # 6. Indicadores Probabilísticos / Matemáticos (Fase 2)
+    # Regime Proxy (HMM/GMM)
+    atr_series = df["atr"] if "atr" in df.columns else _atr(h, l, c)
+    regime_probs = _regime_hmm_proxy(c, atr_series)
+    for col in regime_probs.columns:
+        df[col] = regime_probs[col]
+        
+    # Hurst Exponent (Trend persistence)
+    df["hurst_exponent"] = _hurst_exponent(c, lags=30)
+    
+    # Time Series Momentum & T-Stat
+    ts_slope, ts_tstat = _ts_momentum(c, period=20)
+    df["ts_momentum"] = ts_slope
+    df["ts_tstat"] = ts_tstat
+    
+    # Z-Score VWAP (Mean Reversion Arbitrage)
+    df["zscore_vwap"] = _zscore_vwap(c, v, period=50)
+
+    # Volatility GARCH proxy (Aceleración de varianza para Breakouts)
+    ret = c.pct_change()
+    df["vol_garch_proxy"] = _volatility_garch_proxy(ret, span=20)
 
     # Bollinger Bands
     df["bb_mid"] = df["bb_middle"]
