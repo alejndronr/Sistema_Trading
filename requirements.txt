@@ -4,8 +4,9 @@ pandas>=2.2.0                # DataFrame operations
 numpy>=1.26.0                # Numerical computing
 
 # ── Technical Indicators ───────────────────────────────────────────────────────
-pandas-ta==0.3.14b0          # 130+ indicators (RSI, MACD, BB, etc.)
-ta>=0.11.0                   # Alternative TA library (fallback)
+# pandas-ta==0.3.14b0          # Unused: 130+ indicators (RSI, MACD, BB, etc.)
+# ta>=0.11.0                   # Unused: Alternative TA library (fallback)
+
 
 # ── Database ───────────────────────────────────────────────────────────────────
 sqlalchemy>=2.0.0            # ORM / query builder (SQLite + PG compatible)
@@ -44,5 +45,6 @@ pytz>=2024.1                 # Timezone handling
 tqdm>=4.66.0                 # Progress bars for data downloads
 
 # ── Optional/V3.0 Libraries (with fallbacks) ───────────────────────────────────
-smart-money-concepts>=0.0.10   # Fallback to custom indicators/market_structure
+# smart-money-concepts>=0.0.10   # Unused: Fallback to custom indicators/market_structure
 mplfinance>=0.12.10b0          # Fallback to text notifications if unavailable
+
