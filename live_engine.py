@@ -893,6 +893,40 @@ class LiveEngineV6:
                          conviction=state.conviction_score,
                          risk_mult=f"{state.risk_multiplier:.0%}",
                          strategies=state.active_strategies)
+                # ── Persistir en PostgreSQL (para el dashboard) ──────────────
+                if self._portfolio:
+                    try:
+                        strategies_str = ",".join(state.active_strategies) if state.active_strategies else ""
+                        async with self._portfolio._session_factory() as s:
+                            await s.execute(text("""
+                                INSERT INTO cycle_state
+                                    (symbol, phase, conviction, risk_multiplier,
+                                     rsi_daily, rsi_weekly, pct_from_ath,
+                                     active_strategies, updated_at)
+                                VALUES (:sym, :phase, :conv, :risk,
+                                        :rsi_d, :rsi_w, :pct_ath, :strats, NOW())
+                                ON CONFLICT (symbol) DO UPDATE SET
+                                    phase=EXCLUDED.phase,
+                                    conviction=EXCLUDED.conviction,
+                                    risk_multiplier=EXCLUDED.risk_multiplier,
+                                    rsi_daily=EXCLUDED.rsi_daily,
+                                    rsi_weekly=EXCLUDED.rsi_weekly,
+                                    pct_from_ath=EXCLUDED.pct_from_ath,
+                                    active_strategies=EXCLUDED.active_strategies,
+                                    updated_at=NOW()
+                            """), {
+                                "sym":   symbol,
+                                "phase": state.phase,
+                                "conv":  float(state.conviction_score) / 100.0,
+                                "risk":  state.risk_multiplier,
+                                "rsi_d": state.rsi_daily,
+                                "rsi_w": state.rsi_weekly,
+                                "pct_ath": state.pct_from_ath,
+                                "strats": strategies_str,
+                            })
+                            await s.commit()
+                    except Exception as exc2:
+                        log.debug("cycle_persist_skip", symbol=symbol, error=str(exc2))
             except Exception as exc:
                 log.warning("cycle_update_error", symbol=symbol, error=str(exc))
 
@@ -1116,9 +1150,27 @@ class LiveEngineV6:
                                     f"⚠️ {sym} suspendido {CB_SL_SUSPEND_MIN}min "
                                     f"({ss.sl_consecutive} SL consecutivos)"
                                 )
+                            # Guardar estado de suspensión en la BD
+                            try:
+                                async with self._portfolio._session_factory() as s:
+                                    await s.execute(text(
+                                        "UPDATE positions SET status='suspended' WHERE symbol=:sym AND status='open'"
+                                    ), {"sym": sym})
+                                    await s.commit()
+                            except Exception as exc:
+                                log.debug("suspend_persist_error", symbol=sym, error=str(exc))
                     else:
                         # Trade cerrado en ganancia → reiniciar contador de SL consecutivos
                         ss.sl_consecutive = 0
+                        # Quitar estado de suspensión en la BD si lo hubiera
+                        try:
+                            async with self._portfolio._session_factory() as s:
+                                await s.execute(text(
+                                    "UPDATE positions SET status='open' WHERE symbol=:sym AND status='suspended'"
+                                ), {"sym": sym})
+                                await s.commit()
+                        except Exception:
+                            pass
 
             capital = await self._portfolio.get_current_capital()
             daily   = await self._portfolio.get_daily_stats()
@@ -1151,10 +1203,10 @@ class LiveEngineV6:
                          setup_quality,entry_price,stop_loss,
                          tp1,tp2,take_profit_1,units,position_size,
                          risk_amount,entry_reason,market_regime,regime,
-                         ml_proba,entry_time,is_backtest,observations)
+                         ml_proba,entry_time,is_backtest,observations,duration_hours,pnl_pct,r_multiple)
                     VALUES(:tid,:strat,:sym,:tf,:dir,:qual,:ep,:sl,
                            :tp1,:tp2,:tp1,:size,:size,:risk,:reason,
-                           :regime,:regime,:ml,NOW(),FALSE,:obs)
+                           :regime,:regime,:ml,NOW(),FALSE,:obs,0,0,0)
                     ON CONFLICT DO NOTHING
                 """), {
                     "tid":    trade.get("id",0),
@@ -1182,12 +1234,43 @@ class LiveEngineV6:
         if not self._portfolio:
             return
         try:
+            import json as _json
+            open_pos = self.state.get("open_positions", [])
+            n_pos    = len(open_pos)
+            capital  = self.state.get("capital", 0.0)
+            pnl_pct  = self.state.get("pnl_today_pct", 0.0)
+            pnl_usd  = round(capital * pnl_pct, 4)
+            regimes_json = _json.dumps(self.state.get("regimes", {}))
+            # cycles: solo serializar campos básicos (evitar objetos no serializables)
+            cycles_simple = {}
+            for sym, cyc in self.state.get("cycles", {}).items():
+                if isinstance(cyc, dict):
+                    cycles_simple[sym] = cyc
+                else:
+                    cycles_simple[sym] = {"phase": str(cyc)}
+            cycles_json = _json.dumps(cycles_simple)
             async with self._portfolio._session_factory() as s:
                 await s.execute(text("""
-                    INSERT INTO system_heartbeat(id,last_ping,engine_version,paper_mode)
-                    VALUES(1,NOW(),:v,:p)
-                    ON CONFLICT(id) DO UPDATE SET last_ping=NOW()
-                """), {"v": ENGINE_VERSION, "p": self.paper_mode})
+                    INSERT INTO system_heartbeat
+                        (id, last_ping, engine_version, paper_mode,
+                         active_positions, pnl_today, regimes_json, cycles_json)
+                    VALUES (1, NOW(), :v, :p, :npos, :pnl, :reg, :cyc)
+                    ON CONFLICT(id) DO UPDATE SET
+                        last_ping=NOW(),
+                        engine_version=EXCLUDED.engine_version,
+                        paper_mode=EXCLUDED.paper_mode,
+                        active_positions=EXCLUDED.active_positions,
+                        pnl_today=EXCLUDED.pnl_today,
+                        regimes_json=EXCLUDED.regimes_json,
+                        cycles_json=EXCLUDED.cycles_json
+                """), {
+                    "v":    ENGINE_VERSION,
+                    "p":    self.paper_mode,
+                    "npos": n_pos,
+                    "pnl":  pnl_usd,
+                    "reg":  regimes_json,
+                    "cyc":  cycles_json,
+                })
                 await s.commit()
         except Exception:
             pass

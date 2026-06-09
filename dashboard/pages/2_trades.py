@@ -169,6 +169,15 @@ if not display_df.empty:
         st.session_state.trades_page = page + 1
         st.rerun()
 
+    # Exportar a CSV
+    csv = display_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Exportar CSV",
+        data=csv,
+        file_name='trades_export.csv',
+        mime='text/csv',
+    )
+
 st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────

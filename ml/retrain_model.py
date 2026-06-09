@@ -812,30 +812,23 @@ def deploy_model(
         fh.write(json.dumps(log_entry) + "\n")
 
     # ── Registrar en PostgreSQL ───────────────────────────────────────────
-    top_feats = ", ".join(list(metrics["feature_importance"].keys())[:5])
+    top_feature = list(metrics["feature_importance"].keys())[0] if metrics["feature_importance"] else ""
     try:
+        import json as _json
+        fi_json = _json.dumps(metrics["feature_importance"])
         with engine.begin() as conn:
             conn.execute(text("""
                 INSERT INTO ml_retrain_log
-                    (model_version, n_trades, n_symbols, cv_accuracy, cv_f1,
-                     precision_val, recall_val, roc_auc, optimal_threshold,
-                     win_rate_dataset, top_features, deployed, notes)
+                    (retrain_date, roc_auc, cv_f1, n_samples, top_feature, threshold, feature_importance_json, notes)
                 VALUES
-                    (:mv, :nt, :ns, :ca, :cf,
-                     :pv, :rv, :ra, :ot,
-                     :wd, :tf, TRUE, :note)
+                    (NOW(), :ra, :cf, :ns, :tf, :th, :fi, :note)
             """), {
-                "mv":  f"{MODEL_VERSION}-V4",
-                "nt":  metrics["n_samples"],
-                "ns":  len([s for s in TRAIN_SYMBOLS]),
-                "ca":  metrics.get("cv_accuracy_mean", 0),
-                "cf":  metrics.get("cv_f1_mean", 0),
-                "pv":  metrics.get("precision_val", 0),
-                "rv":  metrics.get("recall_val", 0),
                 "ra":  metrics.get("cv_roc_auc_mean", 0),
-                "ot":  metrics["optimal_threshold"],
-                "wd":  metrics["win_rate_dataset"],
-                "tf":  top_feats,
+                "cf":  metrics.get("cv_f1_mean", 0),
+                "ns":  metrics["n_samples"],
+                "tf":  top_feature,
+                "th":  metrics["optimal_threshold"],
+                "fi":  fi_json,
                 "note": f"V4 multi-symbol, {timestamp_str}",
             })
     except Exception as exc:

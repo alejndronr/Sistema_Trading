@@ -6,7 +6,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 /* ── Global ── */
-html, body, [class*="css"] {
+html, body, [data-testid="stAppViewContainer"] {
     font-family: 'Inter', sans-serif;
     background-color: #0E1117;
     color: #FAFAFA;
@@ -18,7 +18,7 @@ html, body, [class*="css"] {
     border-right: 1px solid #1E2130;
 }
 
-[data-testid="stSidebar"] .css-1d391kg {
+[data-testid="stSidebarUserContent"] {
     padding-top: 2rem;
 }
 

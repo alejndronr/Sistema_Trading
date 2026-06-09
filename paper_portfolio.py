@@ -92,8 +92,11 @@ class PaperPortfolio:
 
         CREATE TABLE IF NOT EXISTS trades_journal (
             id SERIAL PRIMARY KEY,
+            trade_id INTEGER,
             symbol VARCHAR(20) NOT NULL,
-            strategy VARCHAR(30) NOT NULL,
+            strategy VARCHAR(50) NOT NULL,
+            timeframe VARCHAR(10),
+            direction VARCHAR(10) DEFAULT 'long',
             entry_time TIMESTAMPTZ NOT NULL,
             exit_time TIMESTAMPTZ,
             entry_price DECIMAL(18,8),
@@ -101,15 +104,28 @@ class PaperPortfolio:
             stop_loss DECIMAL(18,8),
             tp1 DECIMAL(18,8),
             tp2 DECIMAL(18,8),
+            take_profit_1 DECIMAL(18,8),
             units DECIMAL(18,8),
+            position_size DECIMAL(18,8),
             pnl DECIMAL(10,4),
+            pnl_usd DECIMAL(10,4),
             pnl_pct DECIMAL(8,6),
             r_multiple DECIMAL(6,3),
             exit_reason VARCHAR(30),
             ml_proba DECIMAL(5,4),
-            regime VARCHAR(20),
-            commission_paid DECIMAL(10,6)
+            regime VARCHAR(30),
+            market_regime VARCHAR(30),
+            commission_paid DECIMAL(10,6),
+            setup_quality SMALLINT,
+            duration_hours DECIMAL(8,2),
+            is_backtest BOOLEAN DEFAULT FALSE,
+            risk_amount DECIMAL(10,4),
+            entry_reason TEXT,
+            observations TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_tj_entry_time ON trades_journal(entry_time DESC);
+        CREATE INDEX IF NOT EXISTS idx_tj_symbol     ON trades_journal(symbol);
+        CREATE INDEX IF NOT EXISTS idx_tj_strategy   ON trades_journal(strategy);
 
         CREATE TABLE IF NOT EXISTS portfolio_state (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -124,8 +140,36 @@ class PaperPortfolio:
         CREATE TABLE IF NOT EXISTS system_heartbeat (
             id INTEGER PRIMARY KEY DEFAULT 1,
             last_ping TIMESTAMPTZ DEFAULT NOW(),
-            engine_version VARCHAR(20),
-            paper_mode BOOLEAN
+            engine_version VARCHAR(30),
+            paper_mode BOOLEAN,
+            active_positions INTEGER DEFAULT 0,
+            pnl_today DECIMAL(10,4) DEFAULT 0,
+            regimes_json TEXT,
+            cycles_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS cycle_state (
+            symbol VARCHAR(20) PRIMARY KEY,
+            phase VARCHAR(30) NOT NULL,
+            conviction DECIMAL(5,3) DEFAULT 0,
+            risk_multiplier DECIMAL(4,2) DEFAULT 1.0,
+            rsi_daily DECIMAL(6,2),
+            rsi_weekly DECIMAL(6,2),
+            pct_from_ath DECIMAL(8,4),
+            active_strategies TEXT,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS ml_retrain_log (
+            id SERIAL PRIMARY KEY,
+            retrain_date TIMESTAMPTZ DEFAULT NOW(),
+            roc_auc DECIMAL(6,4),
+            cv_f1 DECIMAL(6,4),
+            n_samples INTEGER,
+            top_feature VARCHAR(50),
+            threshold DECIMAL(5,3),
+            feature_importance_json TEXT,
+            notes TEXT
         );
 
         CREATE TABLE IF NOT EXISTS ohlcv (
@@ -145,6 +189,34 @@ class PaperPortfolio:
                 stmt = stmt.strip()
                 if stmt:
                     await conn.execute(text(stmt))
+
+        # ── ALTER TABLE para añadir columnas si la tabla ya existía (migraciones) ──
+        migrations = [
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS trade_id INTEGER",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS timeframe VARCHAR(10)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS direction VARCHAR(10) DEFAULT 'long'",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS take_profit_1 DECIMAL(18,8)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS position_size DECIMAL(18,8)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS pnl_usd DECIMAL(10,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS market_regime VARCHAR(30)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS setup_quality SMALLINT",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS duration_hours DECIMAL(8,2)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS is_backtest BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS risk_amount DECIMAL(10,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS entry_reason TEXT",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS observations TEXT",
+            "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS active_positions INTEGER DEFAULT 0",
+            "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS pnl_today DECIMAL(10,4) DEFAULT 0",
+            "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS regimes_json TEXT",
+            "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS cycles_json TEXT",
+        ]
+        async with self._engine.begin() as conn:
+            for stmt in migrations:
+                try:
+                    await conn.execute(text(stmt))
+                except Exception:
+                    pass  # Ignora si ya existe
+
         log.debug("db_tables_ensured")
 
     async def _load_state(self) -> None:

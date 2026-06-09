@@ -175,9 +175,8 @@ if ps:
     # Suspensiones activas (SL consecutive)
     with cb3:
         try:
-            susp_df = query_pg(
-                "SELECT symbol FROM positions WHERE status = 'suspended'"
-            )
+            from dashboard.components.db import get_suspended_symbols
+            susp_df = get_suspended_symbols()
             n_susp = len(susp_df) if not susp_df.empty else 0
         except Exception:
             n_susp = 0

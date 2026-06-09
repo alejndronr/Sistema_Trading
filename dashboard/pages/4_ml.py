@@ -166,16 +166,27 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">⭐ Feature Importance</div>', unsafe_allow_html=True)
 
-model_meta_path = ROOT / "ml" / "model_metadata.json"
 features = {}
 
-if model_meta_path.exists():
+# Primero intentar desde BD
+if not retrain_df.empty and "feature_importance_json" in retrain_df.columns:
     try:
-        with open(model_meta_path) as f:
-            meta = json.load(f)
-        features = meta.get("feature_importance", {})
+        latest_fi_json = retrain_df.iloc[0]["feature_importance_json"]
+        if latest_fi_json:
+            features = json.loads(latest_fi_json)
     except Exception:
         pass
+
+# Fallback al archivo local
+if not features:
+    model_meta_path = ROOT / "ml" / "model_metadata.json"
+    if model_meta_path.exists():
+        try:
+            with open(model_meta_path) as f:
+                meta = json.load(f)
+            features = meta.get("feature_importance", {})
+        except Exception:
+            pass
 
 if features:
     feat_df = pd.DataFrame(list(features.items()), columns=["Feature", "Importance"])\

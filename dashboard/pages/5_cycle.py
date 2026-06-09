@@ -52,9 +52,8 @@ st.markdown('<div class="section-header">📊 Indicadores de Ciclo por Par</div>
 # Intentar datos reales de la BD
 cycle_data = []
 try:
-    cycle_df = query_pg(
-        "SELECT symbol, phase, conviction, rsi_daily, rsi_weekly, pct_from_ath, ema200_dist FROM cycle_state ORDER BY symbol"
-    )
+    from dashboard.components.db import get_cycle_states
+    cycle_df = get_cycle_states()
     if not cycle_df.empty:
         cycle_data = cycle_df.to_dict("records")
 except Exception:

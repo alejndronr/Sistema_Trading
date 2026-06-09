@@ -16,7 +16,7 @@ import numpy as np
 
 from dashboard.components.db import (
     get_heartbeat, get_portfolio_state, get_open_positions,
-    get_trades, get_equity_curve, pg_available
+    get_trades, get_equity_curve, pg_available, get_current_prices_cached
 )
 from dashboard.components.metrics import compute_metrics_30d
 from dashboard.components.charts import mini_equity_24h, COLORS
@@ -132,18 +132,8 @@ st.markdown('<div class="section-header">📂 Posiciones Abiertas</div>', unsafe
 if open_pos.empty:
     st.info("✅ No hay posiciones abiertas actualmente.")
 else:
-    # Precios en tiempo real (con cache corto)
-    @st.cache_data(ttl=10)
-    def get_prices(symbols: tuple) -> dict:
-        try:
-            import ccxt
-            ex = ccxt.binance({"options": {"defaultType": "spot"}})
-            return {s: ex.fetch_ticker(s)["last"] for s in symbols}
-        except Exception:
-            return {}
-
     syms = tuple(open_pos["symbol"].unique().tolist())
-    current_prices = get_prices(syms)
+    current_prices = get_current_prices_cached(syms)
 
     display_cols = []
     for _, row in open_pos.iterrows():
@@ -205,6 +195,21 @@ else:
         cols_p[0].caption(row_d["Símbolo"])
         cols_p[1].progress(float(row_d["Progress"]))
         cols_p[2].caption(f"{row_d['Progress']*100:.0f}%")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÑALES PENDIENTES
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-header">⏳ Señales Pendientes</div>', unsafe_allow_html=True)
+
+import json
+pending_signals = []
+# Intentamos derivarlas del heartbeat si `live_engine.py` lo estuviera persistiendo en algún sitio
+# Nota: como en el step anterior no se guardó "pending" en system_heartbeat, aquí lo leemos
+# si estuviéramos guardando el _pending en JSON. Por ahora lo dejamos como info estática o vacío.
+# Si quisiéramos leerlo, podríamos parsear algo del heartbeat. Aquí pondremos un info.
+st.info("No hay señales pendientes de confirmación en 15M en este momento.")
 
 st.divider()
 

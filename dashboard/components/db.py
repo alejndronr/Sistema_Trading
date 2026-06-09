@@ -58,6 +58,24 @@ def query_pg(sql: str, params=None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def execute_pg(sql: str, params=None) -> None:
+    """Ejecuta una query en PostgreSQL sin cachear (para INSERT/UPDATE/DELETE)."""
+    conn = get_pg_connection()
+    if conn is None:
+        return
+    try:
+        if conn.closed:
+            st.cache_resource.clear()
+            conn = get_pg_connection()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+    except Exception as e:
+        st.warning(f"⚠️ PostgreSQL execute error: {e}")
+        if conn and not conn.closed:
+            conn.rollback()
+
+
 def pg_available() -> bool:
     """True si PostgreSQL está disponible."""
     conn = get_pg_connection()
@@ -85,7 +103,7 @@ def query_sqlite(sql: str, params=None) -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_heartbeat() -> dict:
     df = query_pg(
-        "SELECT last_ping, engine_version, paper_mode FROM system_heartbeat WHERE id = 1"
+        "SELECT last_ping, engine_version, paper_mode, active_positions, pnl_today, regimes_json, cycles_json FROM system_heartbeat WHERE id = 1"
     )
     if df.empty:
         return {}
@@ -106,6 +124,18 @@ def get_portfolio_state() -> dict:
 def get_open_positions() -> pd.DataFrame:
     return query_pg(
         "SELECT * FROM positions WHERE status = 'open' ORDER BY id DESC"
+    )
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_suspended_symbols() -> pd.DataFrame:
+    return query_pg(
+        "SELECT symbol FROM positions WHERE status = 'suspended'"
+    )
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cycle_states() -> pd.DataFrame:
+    return query_pg(
+        "SELECT * FROM cycle_state ORDER BY symbol"
     )
 
 
@@ -141,6 +171,26 @@ def get_ml_retrain_log() -> pd.DataFrame:
     return query_pg(
         "SELECT * FROM ml_retrain_log ORDER BY retrain_date DESC LIMIT 50"
     )
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def get_current_prices_cached(symbols: list) -> dict:
+    """Intenta conseguir los precios por CCXT; si falla, usa el último de PostgreSQL cacheado"""
+    try:
+        import ccxt
+        exchange = ccxt.binance({"options": {"defaultType": "spot"}})
+        prices = {}
+        # Para evitar spam de requests si son muchos, en el dashboard
+        # típicamente se usará para los que están en open_positions o ciclo.
+        for sym in symbols:
+            try:
+                t = exchange.fetch_ticker(sym)
+                prices[sym] = float(t["last"])
+            except Exception:
+                pass
+        return prices
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
