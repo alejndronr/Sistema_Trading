@@ -50,7 +50,8 @@ class PaperPortfolio:
         self._session_factory = sessionmaker(
             self._engine, class_=AsyncSession, expire_on_commit=False
         )
-        self._max_price: Dict[int, float] = {}   # position_id → precio máximo visto
+        self._max_price: Dict[int, float] = {}   # position_id → precio máximo visto (longs)
+        self._min_price: Dict[int, float] = {}   # position_id → precio mínimo visto (shorts)
 
     # ── Inicialización ─────────────────────────────────────────────────────────
 
@@ -243,6 +244,7 @@ class PaperPortfolio:
             await session.commit()
 
         self._max_price[position_id] = fill_price
+        self._min_price[position_id] = fill_price
 
         trade = {
             "id":           position_id,
@@ -359,6 +361,52 @@ class PaperPortfolio:
                     atr_for_trail = atr_saved if atr_saved > 0 else peak * 0.015
                     trailing_sl = peak - ATR_TRAILING_MULT * atr_for_trail
                     if trailing_sl > sl and low <= trailing_sl:
+                        closed_trade = await self.close_position(
+                            pos_id, trailing_sl, "trailing_stop"
+                        )
+                        closed.append(closed_trade)
+            elif direction == "short":
+                # ── SL hit ────────────────────────────────────────────────────
+                if high >= sl:
+                    closed_trade = await self.close_position(pos_id, sl, "stop_loss")
+                    closed.append(closed_trade)
+                    continue
+
+                # ── TP1 hit (parcial: cerrar 50%) ─────────────────────────────
+                if not tp1_hit and low <= tp1:
+                    units_to_close = remaining * 0.5
+                    await self._partial_close(session, pos_id, tp1, units_to_close)
+                    # Mover SL a breakeven
+                    entry = float(pos["entry_price"])
+                    await session.execute(
+                        text("""
+                            UPDATE positions
+                            SET tp1_hit = TRUE,
+                                stop_loss = :be,
+                                remaining_units = :rem
+                            WHERE id = :pid
+                        """),
+                        {"be": entry, "rem": remaining - units_to_close, "pid": pos_id},
+                    )
+                    await session.commit()
+                    log.info("tp1_hit_partial_close_short", id=pos_id, symbol=symbol)
+                    continue
+
+                # ── TP2 hit (resto de la posición) ────────────────────────────
+                if tp1_hit and low <= tp2:
+                    closed_trade = await self.close_position(pos_id, tp2, "tp2")
+                    closed.append(closed_trade)
+                    continue
+
+                # ── Trailing stop post-TP1 ─────────────────────────────────
+                if tp1_hit:
+                    # Actualizamos precio mínimo
+                    self._min_price[pos_id] = min(self._min_price.get(pos_id, price), price)
+                    trough = self._min_price[pos_id]
+                    atr_saved = float(pos.get("atr_entry", 0) or 0)
+                    atr_for_trail = atr_saved if atr_saved > 0 else trough * 0.015
+                    trailing_sl = trough + ATR_TRAILING_MULT * atr_for_trail
+                    if trailing_sl < sl and high >= trailing_sl:
                         closed_trade = await self.close_position(
                             pos_id, trailing_sl, "trailing_stop"
                         )

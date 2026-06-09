@@ -112,17 +112,21 @@ class AssetConfig:
 
 
 ASSETS: Dict[str, AssetConfig] = {
-    # Prioridad 1 — Alta liquidez
+    # Prioridad 1 — Alta liquidez y rentabilidad validada (Sharpe ancla)
     "BTC/USDC": AssetConfig("BTC/USDC", AssetPriority.HIGH, 0.001, 100_000_000, allow_shorts=False),
     "ETH/USDC": AssetConfig("ETH/USDC", AssetPriority.HIGH, 0.001, 100_000_000),
-    # Prioridad 2 — Volatilidad media
-    "SOL/USDC": AssetConfig("SOL/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
-    "BNB/USDC": AssetConfig("BNB/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "DOT/USDC": AssetConfig("DOT/USDC", AssetPriority.HIGH, 0.002, 50_000_000),
+
+    # Prioridad 2 — Estructurales, volatilidad media para EV
     "AVAX/USDC": AssetConfig("AVAX/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
-    # Prioridad 3 — Solo en tendencia fuerte
-    "LINK/USDC": AssetConfig("LINK/USDC", AssetPriority.LOW, 0.002, 50_000_000),
-    "DOT/USDC": AssetConfig("DOT/USDC", AssetPriority.LOW, 0.002, 50_000_000),
-    "MATIC/USDC": AssetConfig("MATIC/USDC", AssetPriority.LOW, 0.002, 50_000_000),
+    "ADA/USDC": AssetConfig("ADA/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "NEAR/USDC": AssetConfig("NEAR/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+    "SUI/USDC": AssetConfig("SUI/USDC", AssetPriority.MEDIUM, 0.002, 50_000_000),
+
+    # Prioridad 3 — Volatilidad Extrema / Mean Reversion
+    "WLD/USDC": AssetConfig("WLD/USDC", AssetPriority.LOW, 0.003, 30_000_000),
+    "TAO/USDC": AssetConfig("TAO/USDC", AssetPriority.LOW, 0.003, 30_000_000),
+    "AAVE/USDC": AssetConfig("AAVE/USDC", AssetPriority.LOW, 0.003, 30_000_000),
 }
 
 # Pares ordenados por prioridad (para el backtest)

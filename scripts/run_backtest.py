@@ -32,7 +32,6 @@ def get_strategy(strategy_name: str, symbol: str, timeframe: str):
         MeanReversionStrategy,
         BreakoutStrategy,
     )
-
     strategies = {
         "trend_following": TrendFollowingStrategy,
         "mean_reversion": MeanReversionStrategy,

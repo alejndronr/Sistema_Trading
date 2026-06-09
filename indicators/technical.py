@@ -64,6 +64,75 @@ def _linear_slope(y: np.ndarray) -> float:
     den = n * np.dot(x, x) - x.sum() ** 2
     return float(num / den) if den != 0 else 0.0
 
+def _hurst_exponent(close: pd.Series, lags: int = 20) -> pd.Series:
+    """
+    Exponente de Hurst vectorizado usando Variance Ratio proxy.
+    Optimizado para Atom E3950 (solo Pandas/NumPy).
+    < 0.5 Mean Reverting, 0.5 Random Walk, > 0.5 Trending.
+    """
+    lag1_var = close.diff().rolling(lags).var()
+    lag2_var = close.diff(2).rolling(lags).var()
+    # Para evitar división por cero
+    lag1_var = lag1_var.replace(0, np.nan)
+    # H approx = log2(var(lag2)/var(lag1)) / 2  (Simplified R/S proxy)
+    hurst = np.log2(lag2_var / lag1_var) / 2.0
+    return hurst.fillna(0.5)
+
+def _zscore_vwap(close: pd.Series, volume: pd.Series, period: int = 20) -> pd.Series:
+    """Z-Score del precio contra el VWAP de N periodos."""
+    typical_price = close # Simplificación usando Close para mayor velocidad
+    vwap = (typical_price * volume).rolling(period).sum() / volume.rolling(period).sum()
+    std = close.rolling(period).std()
+    std = std.replace(0, np.nan)
+    return (close - vwap) / std
+
+def _volatility_garch_proxy(returns: pd.Series, span: int = 20) -> pd.Series:
+    """
+    Proxy de GARCH(1,1) usando EWMA de retornos al cuadrado.
+    Retorna el ratio de aceleración de la varianza.
+    """
+    ret_sq = returns ** 2
+    vol_ema = ret_sq.ewm(span=span).mean()
+    # Volatility Ratio (Aceleración)
+    vol_ratio = vol_ema / vol_ema.shift(5).replace(0, np.nan)
+    return vol_ratio.fillna(1.0)
+
+def _ts_momentum(close: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Series]:
+    """
+    Time Series Momentum: Pendiente y T-Stat de la regresión lineal sobre 20 velas.
+    Implementación vectorizada rápida.
+    """
+    x = np.arange(period)
+    x_mean = x.mean()
+    x_var = x.var() * period
+    
+    # Usando rolling apply de numpy es lento en python, 
+    # Usaremos una aproximación rápida con la diferencia entre la EMA rápida y lenta normalizada
+    # o implementamos una regresión lineal rolling de pandas pura.
+    
+    # Solución 100% vectorizada para rolling slope:
+    # slope = cov(x, y) / var(x)
+    sum_x = np.sum(x)
+    sum_x2 = np.sum(x**2)
+    
+    def calc_slope(y):
+        n = len(y)
+        if n < period: return 0.0
+        sum_y = np.sum(y)
+        sum_xy = np.sum(x * y)
+        numerator = n * sum_xy - sum_x * sum_y
+        denominator = n * sum_x2 - sum_x**2
+        return numerator / denominator if denominator != 0 else 0.0
+        
+    # Pandas rolling apply (with raw=True it compiles to C and is extremely fast)
+    slope = close.rolling(period).apply(calc_slope, raw=True)
+    
+    # Para el t-stat, simplificamos: slope / standard_error
+    # T-stat proxy:
+    t_stat = slope / (close.rolling(period).std() / np.sqrt(period))
+    return slope.fillna(0.0), t_stat.fillna(0.0)
+
+
 # ── Capa V5 Clases ────────────────────────────────────────────────────────────
 
 class CandlePatterns:
@@ -1321,6 +1390,26 @@ def apply_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
                                     l.values.astype(DTYPE), c.values.astype(DTYPE),
                                     v.values.astype(DTYPE))
     df["cvd_pos"] = df["delta_vol"].rolling(5).mean() > 0.15
+
+    # 6. Atom-Compatible Quantitative Indicators
+    # 6.1 Hurst Exponent (Vectorized)
+    df["hurst_exp"] = _hurst_exponent(df["close"])
+    
+    # 6.2 Z-Score VWAP
+    if "vwap" not in df.columns:
+        # Fallback to simple VWMA if VWAP wasn't calculated by VolatilityIndicators
+        tp = (h + l + c) / 3
+        df["vwap"] = (tp * v).rolling(20).sum() / v.rolling(20).sum()
+    df["zscore_vwap"] = _zscore_vwap(df["close"], df["volume"])
+    
+    # 6.3 Volatility GARCH Proxy (EWMA)
+    returns = df["close"].pct_change().fillna(0)
+    df["vol_ratio_garch"] = _volatility_garch_proxy(returns)
+    
+    # 6.4 Time Series Momentum (TSM)
+    slope, tstat = _ts_momentum(df["close"])
+    df["ts_momentum_slope"] = slope
+    df["ts_momentum_tstat"] = tstat
 
     # OBV Accel
     df["obv_accel"] = (df["obv"] > df["obv"].rolling(10).mean()*1.005) & (df["obv"].diff(3) > 0)

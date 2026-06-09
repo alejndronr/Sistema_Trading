@@ -170,7 +170,11 @@ def _get_db_engine():
     # Forzar IPv4
     url = url.replace("localhost", "127.0.0.1")
 
-    engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+    connect_args = {}
+    if not url.startswith("sqlite"):
+        connect_args["connect_timeout"] = 10
+
+    engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
 
     # Verificar conexión
     with engine.connect() as conn:
