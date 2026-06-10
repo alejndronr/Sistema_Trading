@@ -206,10 +206,14 @@ with col_sqlite:
             def color_stale(val):
                 return "color: #FF4444" if val else "color: #00C851"
 
+            df_to_style = ohlcv_summary[["symbol", "timeframe", "candles", "last_date", "stale"]]
+            if hasattr(df_to_style.style, "map"):
+                styled_df = df_to_style.style.map(color_stale, subset=["stale"]).format({"candles": "{:,}"})
+            else:
+                styled_df = df_to_style.style.applymap(color_stale, subset=["stale"]).format({"candles": "{:,}"})
+
             st.dataframe(
-                ohlcv_summary[["symbol", "timeframe", "candles", "last_date", "stale"]]\
-                    .style.applymap(color_stale, subset=["stale"])\
-                    .format({"candles": "{:,}"}),
+                styled_df,
                 height=250, use_container_width=True
             )
         else:

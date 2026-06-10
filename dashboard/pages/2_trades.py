@@ -47,7 +47,7 @@ with st.sidebar:
     
     if not pg_available():
         np.random.seed(42)
-        mock_dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=150, freq="12H")
+        mock_dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=150, freq="12h")
         df_all = pd.DataFrame({
             "entry_time": mock_dates,
             "symbol": np.random.choice(["BTC/USDC", "ETH/USDC", "SOL/USDC"], 150),

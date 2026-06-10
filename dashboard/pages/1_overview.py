@@ -95,7 +95,7 @@ if not pg_available():
         {"symbol": "ETH/USDC", "entry_price": 3200, "direction": "LONG", "stop_loss": 3100, "tp1": 3400, "units": 0.5, "strategy": "MeanReversion", "tp1_hit": True, "ml_proba": 0.55}
     ])
     
-    dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=24, freq="1H")
+    dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=24, freq="1h")
     equity_df = pd.DataFrame({
         "timestamp": dates,
         "capital": np.linspace(1400, 1450.75, 24) + np.random.randn(24)*5
