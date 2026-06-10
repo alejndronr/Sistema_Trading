@@ -117,8 +117,11 @@ def _ts_momentum(close: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Seri
     # Pendiente: Cambio de precio promedio por vela
     slope = (close - close.shift(period)) / period
     
-    # T-Stat proxy: Z-score del momentum (amplitud comparable al t-stat real)
-    t_stat = (close - close.shift(period)) / (close.rolling(period).std() + 1e-8)
+    # T-Stat proxy: Z-score del momentum
+    # Floor: 0.5% del precio para evitar falsos positivos extremos cuando la volatilidad es casi cero
+    min_std = close * 0.005
+    std_adj = np.maximum(close.rolling(period).std(), min_std)
+    t_stat = (close - close.shift(period)) / std_adj
     
     return slope.fillna(0.0), t_stat.fillna(0.0)
 
@@ -1479,5 +1482,30 @@ def apply_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["trend_down"] = (df["ema21"]<df["ema55"]) & (df["ema55"]<df["ema200"])
     df["above_vwap"] = c > df["vwap"]
     df["momentum_3"] = c.pct_change(3) * 100
+
+    # ── Phase 7: 4H Real Timeframe Synthesis ──
+    if "timestamp" in df.columns:
+        try:
+            df_ts = df.copy()
+            if not pd.api.types.is_datetime64_any_dtype(df_ts["timestamp"]):
+                df_ts["timestamp"] = pd.to_datetime(df_ts["timestamp"], unit='ms' if df_ts["timestamp"].dtype in [np.int64, np.float64] else None)
+            
+            df_4h = df_ts.resample('4h', on='timestamp').agg({'close': 'last'}).dropna()
+            df_4h['ema200_4h'] = _ema(df_4h['close'], 200)
+            df_4h = df_4h.reset_index()
+            
+            df_ts = df_ts.sort_values("timestamp")
+            df_4h = df_4h.sort_values("timestamp")
+            merged = pd.merge_asof(df_ts[["timestamp"]], df_4h[["timestamp", "ema200_4h"]], on="timestamp", direction="backward")
+            
+            # Compatibilidad Pandas 1.x y 2.x para backward fill
+            if hasattr(merged["ema200_4h"], "bfill"):
+                df["ema_800"] = merged["ema200_4h"].bfill().values
+            else:
+                df["ema_800"] = merged["ema200_4h"].fillna(method="bfill").values
+        except Exception:
+            df["ema_800"] = _ema(c, 800)
+    else:
+        df["ema_800"] = _ema(c, 800)
 
     return df

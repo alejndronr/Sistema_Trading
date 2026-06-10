@@ -1070,6 +1070,9 @@ class LiveEngineV6:
                 state = self._cycle_detector.detect(df_d)
                 self._sym_state[symbol].cycle         = state
                 self._sym_state[symbol].cycle_updated = time.time()
+                
+                prev_phase = self.state["cycles"].get(symbol, {}).get("phase")
+                
                 self.state["cycles"][symbol] = {
                     "phase": state.phase,
                     "risk_mult": state.risk_multiplier,
@@ -1079,6 +1082,17 @@ class LiveEngineV6:
                          conviction=state.conviction_score,
                          risk_mult=f"{state.risk_multiplier:.0%}",
                          strategies=state.active_strategies)
+                         
+                # ── Phase 7: Regime Transition Alerts ──
+                if prev_phase and prev_phase != state.phase and self._bot:
+                    msg = (
+                        f"🔄 <b>Cambio de fase en {symbol}:</b> {prev_phase} → {state.phase}\n"
+                        f"RSI diario: {state.rsi_daily} | % ATH: {state.pct_from_ath}%\n"
+                        f"Nuevas estrategias: {', '.join(state.active_strategies)}\n"
+                        f"Risk multiplier: {state.risk_multiplier:.0%}\n"
+                        f"Próxima acción: revisar posiciones abiertas."
+                    )
+                    asyncio.create_task(self._bot.send_message(msg))
                 # ── Persistir en PostgreSQL (para el dashboard) ──────────────
                 if self._portfolio:
                     try:
@@ -1213,11 +1227,29 @@ class LiveEngineV6:
             await asyncio.sleep(wait + 5)
             if self.state["kill"] or self.state["paused"] or not self._pending:
                 continue
-            for symbol, signal in list(self._pending.items()):
-                try:
-                    await self._attempt_entry(symbol, signal)
-                except Exception as exc:
-                    log.exception("entry_error_v6", symbol=symbol, error=str(exc))
+                
+            # ── Pair Correlation Circuit Breaker (Fase 6) ──
+            # Si se detectan múltiples señales simultáneas (ej. BTC y ETH rompen al alza a la vez)
+            # ordenamos por ML Proba y Score, y solo ejecutamos la MEJOR señal del batch.
+            sorted_signals = sorted(
+                self._pending.items(),
+                key=lambda x: (x[1].ml_proba, x[1].score),
+                reverse=True
+            )
+            
+            best_symbol, best_signal = sorted_signals[0]
+            
+            if len(sorted_signals) > 1:
+                log.info("circuit_breaker_correlation", 
+                         msg=f"Filtrando {len(sorted_signals)-1} señales simultáneas. Ejecutando solo {best_symbol}")
+                
+            try:
+                await self._attempt_entry(best_symbol, best_signal)
+            except Exception as exc:
+                log.exception("entry_error_v6", symbol=best_symbol, error=str(exc))
+                
+            # Descartamos el resto para no sobre-exponer la cartera al mismo movimiento de mercado
+            self._pending.clear()
 
     async def _attempt_entry(self, symbol: str, signal: SignalResult) -> None:
         open_pos   = await self._portfolio.get_open_positions()

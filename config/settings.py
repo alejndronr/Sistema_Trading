@@ -245,8 +245,8 @@ class TrendFollowingParams:
     """Parámetros exactos de Estrategia 1: Trend Following."""
     # Condiciones de entrada
     min_adx: float = 20.0             # era 25
-    rsi_min: float = 40.0             # era 45
-    rsi_max: float = 70.0             # era 65
+    rsi_min: float = 50.0             # Solo comprar si el momentum base es alcista
+    rsi_max: float = 85.0             # Permitir breakouts fuertes (antes 70 capaba las tendencias)
     pullback_pct: float = 0.02        # era 0.005 (±2%)
     # Gestión de trade
     sl_atr_multiplier: float = 1.0    # SL = 1 ATR bajo swing low

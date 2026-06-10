@@ -197,80 +197,22 @@ class CycleDetector:
         halving_context, days_to_next = self._classify_halving_context(now)
 
         scores: Dict[str, int] = {
-            "BEAR_DEEP":      0,
-            "BEAR_RECOVERY":  0,
-            "ACCUMULATION":   0,
-            "BULL_EARLY":     0,
-            "BULL_MATURE":    0,
-            "BULL_LATE":      0,
-            "DISTRIBUTION":   0,
+            "BEAR_DEEP":      0, "BEAR_RECOVERY":  0, "ACCUMULATION":   0,
+            "BULL_EARLY":     0, "BULL_MATURE":    0, "BULL_LATE":      0, "DISTRIBUTION":   0,
         }
 
-        above_200d = price > ema_200d
-        above_50d  = price > ema_50d
-        above_200w_proxy = price > sma_200d
-
-        if pct_from_ath < self.BEAR_DEEP_THRESHOLD:
-            scores["BEAR_DEEP"] += 40
-        if not above_200d and not above_50d:
-            scores["BEAR_DEEP"] += 25
-        if rsi_14d < 35:
-            scores["BEAR_DEEP"] += 20
-        if rsi_w < 40:
-            scores["BEAR_DEEP"] += 15
-
-        if self.BEAR_DEEP_THRESHOLD <= pct_from_ath < self.BEAR_RECOV_THRESHOLD:
-            scores["BEAR_RECOVERY"] += 35
-        if not above_200d and above_50d:
-            scores["BEAR_RECOVERY"] += 25
-        if 35 <= rsi_14d <= 50:
-            scores["BEAR_RECOVERY"] += 20
-        if trend_weekly == "up" and not above_200w_proxy:
-            scores["BEAR_RECOVERY"] += 20
-
-        if self.BEAR_RECOV_THRESHOLD <= pct_from_ath < self.ACCUM_THRESHOLD:
-            scores["ACCUMULATION"] += 35
-        if above_200d and not above_50d:
-            scores["ACCUMULATION"] += 20
-        if 45 <= rsi_14d <= 60:
-            scores["ACCUMULATION"] += 20
-        if trend_weekly == "sideways":
-            scores["ACCUMULATION"] += 25
-
-        if self.ACCUM_THRESHOLD <= pct_from_ath < -0.05:
-            scores["BULL_EARLY"] += 30
-        if above_200d and above_50d and halving_context == "post_halving_early":
-            scores["BULL_EARLY"] += 30
-        if 50 <= rsi_14d <= 65:
-            scores["BULL_EARLY"] += 20
-        if trend_weekly == "up" and above_200w_proxy:
-            scores["BULL_EARLY"] += 20
-
-        if -0.05 <= pct_from_ath <= 0.20:
-            scores["BULL_MATURE"] += 40
-        if above_200d and above_50d:
-            scores["BULL_MATURE"] += 25
-        if 60 <= rsi_w < self.BULL_LATE_RSI_W:
-            scores["BULL_MATURE"] += 20
-        if trend_weekly == "up":
-            scores["BULL_MATURE"] += 15
-
-        if rsi_w >= self.BULL_LATE_RSI_W:
-            scores["BULL_LATE"] += 50
-        if pct_from_ath > 0:
-            scores["BULL_LATE"] += 30
-        if rsi_14d > 75:
-            scores["BULL_LATE"] += 20
-
-        if rsi_w >= self.DISTRIBUTION_RSI_W:
-            scores["DISTRIBUTION"] += 50
-        if days_since_ath < 30 and rsi_14d < rsi_28d:
-            scores["DISTRIBUTION"] += 30
-        if pct_from_ath > 0.10:
-            scores["DISTRIBUTION"] += 20
+        # ── Regime Persistence Filter (Fase 6 & 7) ──
+        # Evaluamos los últimos 2 días y sumamos los scores para evitar whipsaws (balanceando lag)
+        lookback = min(2, len(df))
+        for offset in range(lookback):
+            idx = -1 - offset
+            day_scores = self._score_day(df, idx, ema_200d, ema_50d, ath_period, ath_date, sma_200d, sma_200w, df_w)
+            for k, v in day_scores.items():
+                scores[k] += v
 
         phase = max(scores, key=scores.get)
-        total_score = scores[phase]
+        # Normalizamos el total score (dividiendo entre lookback) para mantener phase_strength coherente
+        total_score = scores[phase] / lookback
         phase_strength = min(total_score / 100.0, 1.0)
 
         strategy_map = {
@@ -300,8 +242,71 @@ class CycleDetector:
             days_to_next_halving = days_to_next,
             active_strategies   = config["strategies"],
             risk_multiplier     = config["risk"],
-            conviction_score    = min(total_score, 100),
+            conviction_score    = int(min(total_score, 100)),
         )
+
+    def _score_day(self, df: pd.DataFrame, idx: int, ema_200d: float, ema_50d: float, ath_period: float, ath_date: pd.Timestamp, sma_200d: float, sma_200w: float, df_w: pd.DataFrame) -> Dict[str, int]:
+        scores = {k: 0 for k in ["BEAR_DEEP", "BEAR_RECOVERY", "ACCUMULATION", "BULL_EARLY", "BULL_MATURE", "BULL_LATE", "DISTRIBUTION"]}
+        
+        close = df["close"].astype(float)
+        price = float(close.iloc[idx])
+        now = df["timestamp"].iloc[idx]
+        
+        rsi_14d = float(self._rsi(close, 14).iloc[idx])
+        rsi_28d = float(self._rsi(close, 28).iloc[idx])
+        
+        pct_from_ath = (price - ath_period) / ath_period
+        
+        # Aproximación del RSI semanal y tendencia para ese día
+        close_w = df_w[df_w.index <= now]["close"].astype(float)
+        rsi_w = float(self._rsi(close_w, 14).iloc[-1]) if len(close_w) > 14 else 50.0
+        
+        if len(close_w) >= 8:
+            slope = float(close_w.iloc[-4:].pct_change().mean()) * 100
+            trend_weekly = "up" if slope > 1.0 else ("down" if slope < -1.0 else "sideways")
+        else:
+            trend_weekly = "sideways"
+            
+        halving_context, _ = self._classify_halving_context(now)
+        
+        above_200d = price > ema_200d
+        above_50d  = price > ema_50d
+        above_200w_proxy = price > sma_200d
+
+        if pct_from_ath < self.BEAR_DEEP_THRESHOLD: scores["BEAR_DEEP"] += 40
+        if not above_200d and not above_50d: scores["BEAR_DEEP"] += 25
+        if rsi_14d < 35: scores["BEAR_DEEP"] += 20
+        if rsi_w < 40: scores["BEAR_DEEP"] += 15
+
+        if self.BEAR_DEEP_THRESHOLD <= pct_from_ath < self.BEAR_RECOV_THRESHOLD: scores["BEAR_RECOVERY"] += 35
+        if not above_200d and above_50d: scores["BEAR_RECOVERY"] += 25
+        if 35 <= rsi_14d <= 50: scores["BEAR_RECOVERY"] += 20
+        if trend_weekly == "up" and not above_200w_proxy: scores["BEAR_RECOVERY"] += 20
+
+        if self.BEAR_RECOV_THRESHOLD <= pct_from_ath < self.ACCUM_THRESHOLD: scores["ACCUMULATION"] += 35
+        if above_200d and not above_50d: scores["ACCUMULATION"] += 20
+        if 45 <= rsi_14d <= 60: scores["ACCUMULATION"] += 20
+        if trend_weekly == "sideways": scores["ACCUMULATION"] += 25
+
+        if self.ACCUM_THRESHOLD <= pct_from_ath < -0.05: scores["BULL_EARLY"] += 30
+        if above_200d and above_50d and halving_context == "post_halving_early": scores["BULL_EARLY"] += 30
+        if 50 <= rsi_14d <= 65: scores["BULL_EARLY"] += 20
+        if trend_weekly == "up" and above_200w_proxy: scores["BULL_EARLY"] += 20
+
+        if -0.05 <= pct_from_ath <= 0.20: scores["BULL_MATURE"] += 40
+        if above_200d and above_50d: scores["BULL_MATURE"] += 25
+        if 60 <= rsi_w < self.BULL_LATE_RSI_W: scores["BULL_MATURE"] += 20
+        if trend_weekly == "up": scores["BULL_MATURE"] += 15
+
+        if rsi_w >= self.BULL_LATE_RSI_W: scores["BULL_LATE"] += 50
+        if pct_from_ath > 0: scores["BULL_LATE"] += 30
+        if rsi_14d > 75: scores["BULL_LATE"] += 20
+
+        if rsi_w >= self.DISTRIBUTION_RSI_W: scores["DISTRIBUTION"] += 50
+        if days_since_ath < 30 and rsi_14d < rsi_28d: scores["DISTRIBUTION"] += 30
+        if pct_from_ath > 0.10: scores["DISTRIBUTION"] += 20
+
+        return scores
 
     def _default_state(self) -> CycleState:
         return CycleState(

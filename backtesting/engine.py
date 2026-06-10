@@ -233,7 +233,9 @@ class Portfolio:
         risk = pos.risk_amount
         r_multiple = pnl_net / risk if risk > 0 else 0
 
-        duration = (exit_time - pos.entry_time).total_seconds() / 3600
+        _exit_ts = pd.to_datetime(exit_time) if isinstance(exit_time, str) else exit_time
+        _entry_ts = pd.to_datetime(pos.entry_time) if isinstance(pos.entry_time, str) else pos.entry_time
+        duration = (_exit_ts - _entry_ts).total_seconds() / 3600
 
         trade = ClosedTrade(
             trade_id=trade_id,

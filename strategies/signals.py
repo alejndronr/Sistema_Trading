@@ -261,7 +261,7 @@ class TrendFollowingStrategy(BaseStrategy):
         warmup_mask.iloc[200:] = True
 
         # Combinamos el modelo matemático con la confirmación de momentum clásico
-        long_mask = warmup_mask & math_bull_cond & price_above_ema21 & rsi_cond & macd_cond
+        long_mask = warmup_mask & math_bull_cond & ema_cond & price_above_ema21 & rsi_cond & macd_cond
 
         # Volatilidad dinámica (Expansión/Contracción GARCH)
         vol_garch = df.get("vol_garch_proxy", pd.Series(1.0, index=df.index)).astype(float)
@@ -272,7 +272,7 @@ class TrendFollowingStrategy(BaseStrategy):
         swing_low = df["last_swing_low"].astype(float) if "last_swing_low" in df.columns else close - dynamic_atr
         sl_swing  = swing_low - 0.5 * dynamic_atr
         sl_atr    = close - self.p.sl_atr_multiplier * dynamic_atr
-        stop_loss = np.minimum(sl_swing.values, sl_atr.values)
+        stop_loss = np.maximum(sl_swing.values, sl_atr.values)
         risk      = close.values - stop_loss
         tp1       = close.values + self.p.tp1_rr_ratio * risk
         tp2       = close.values + self.p.tp2_rr_ratio * risk
@@ -295,7 +295,7 @@ class TrendFollowingStrategy(BaseStrategy):
         macd_cond_short   = macd_h < 0
 
         if allow_shorts:
-            short_mask = warmup_mask & math_bear_cond & price_below_ema21 & rsi_cond_short & macd_cond_short
+            short_mask = warmup_mask & math_bear_cond & ema_cond_short & price_below_ema21 & rsi_cond_short & macd_cond_short
         else:
             short_mask = pd.Series(False, index=df.index)
 
@@ -303,7 +303,7 @@ class TrendFollowingStrategy(BaseStrategy):
         swing_high = df["last_swing_high"].astype(float) if "last_swing_high" in df.columns else close + dynamic_atr
         sl_swing_short  = swing_high + 0.5 * dynamic_atr
         sl_atr_short    = close + self.p.sl_atr_multiplier * dynamic_atr
-        stop_loss_short = np.maximum(sl_swing_short.values, sl_atr_short.values)
+        stop_loss_short = np.minimum(sl_swing_short.values, sl_atr_short.values)
         risk_short      = stop_loss_short - close.values
         tp1_short       = close.values - self.p.tp1_rr_ratio * risk_short
         tp2_short       = close.values - self.p.tp2_rr_ratio * risk_short
@@ -747,10 +747,16 @@ class MeanReversionStrategy(BaseStrategy):
         math_mr_cond_long = (zscore < -2.0) & (vol_garch < 1.2) & (prob_range > 0.40)
         price_in_bb_lower = close <= (bb_lower + 0.5 * atr)
         
+        # ── Multi-Timeframe Confirmation (Fase 6) ──
+        # Proxy de tendencia HTF: calculada de las velas de 4H sintetizadas o proxy de 800 (Fase 7)
+        ema800 = df.get("ema_800", close.ewm(span=800, adjust=False).mean())
+        # Permitimos MR Long si estamos por encima de la EMA800 (o 3% por debajo), O si hay extrema sobreventa estadística
+        htf_ok_long = (close > (ema800 * 0.97)) | (zscore < -3.0)
+        
         warmup_mask = pd.Series(False, index=df.index)
         warmup_mask.iloc[100:] = True
 
-        long_mask = warmup_mask & math_mr_cond_long & price_in_bb_lower
+        long_mask = warmup_mask & math_mr_cond_long & price_in_bb_lower & htf_ok_long
 
         # Construir SL / TP para LONG
         sl_long = bb_lower - self.p.sl_atr_buffer * atr
@@ -770,7 +776,9 @@ class MeanReversionStrategy(BaseStrategy):
         price_in_bb_upper = close >= (bb_upper - 0.5 * atr)
 
         if allow_shorts:
-            short_mask = warmup_mask & math_mr_cond_short & price_in_bb_upper
+            # ── Multi-Timeframe Confirmation Short (Fase 6 & 7) ──
+            htf_ok_short = (close < (ema800 * 1.03)) | (zscore > 3.0)
+            short_mask = warmup_mask & math_mr_cond_short & price_in_bb_upper & htf_ok_short
             sl_short = bb_upper + self.p.sl_atr_buffer * atr
             tp1_short = ema21
             tp2_short = bb_lower
@@ -801,7 +809,7 @@ class MeanReversionStrategy(BaseStrategy):
         tp2_prices[mask_idx]   = tp2_long.values[mask_idx]
         
         for i in np.where(mask_idx)[0]:
-            reason_arr[i] = f"ZScore_Extremo✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | Precio_en_BB_lower✓"
+            reason_arr[i] = f"ZScore_Extremo✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | HTF_Confirm✓ | Precio_en_BB_lower✓"
             quality_arr[i] = self._classify_long_quality(df.iloc[i], 2).value
             
         # Aplicar Shorts
@@ -812,7 +820,7 @@ class MeanReversionStrategy(BaseStrategy):
             tp2_prices[short_mask_idx]   = tp2_short.values[short_mask_idx]
             
             for i in np.where(short_mask_idx)[0]:
-                reason_arr[i] = f"ZScore_Extremo_Short✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | Precio_en_BB_upper✓"
+                reason_arr[i] = f"ZScore_Extremo_Short✓ (Z:{zscore.iloc[i]:.2f}, VolG:{vol_garch.iloc[i]:.2f}, P_Rng:{prob_range.iloc[i]:.2f}) | HTF_Confirm✓ | Precio_en_BB_upper✓"
                 quality_arr[i] = self._classify_short_quality(df.iloc[i], 2).value
 
         # ── Confianza bayesiana / probabilística ───────────────────────────────
