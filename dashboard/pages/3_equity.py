@@ -26,8 +26,28 @@ if CSS_PATH.exists():
 st.markdown("# 📉 Equity Curve & Riesgo")
 st.divider()
 
+from dashboard.components.db import get_trades, get_equity_curve, pg_available
+
 df = get_trades(limit=5000, real_only=False)
 eq_df = get_equity_curve()
+
+if not pg_available():
+    np.random.seed(1)
+    mock_dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=100, freq="12h")
+    df = pd.DataFrame({
+        "entry_time": mock_dates,
+        "symbol": np.random.choice(["BTC/USDC", "ETH/USDC", "SOL/USDC"], 100),
+        "direction": np.random.choice(["long", "short"], 100),
+        "pnl": np.random.randn(100) * 15,
+        "pnl_usd": np.random.randn(100) * 15,
+        "r_multiple": np.random.randn(100) * 1.5,
+        "duration_hours": np.random.uniform(2, 48, 100)
+    })
+    
+    eq_df = pd.DataFrame({
+        "timestamp": mock_dates,
+        "equity": np.linspace(1400, 1450.75, 100) + np.cumsum(np.random.randn(100)*2)
+    })
 m = compute_metrics(df)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,8 +158,11 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">🚦 Circuit Breakers</div>', unsafe_allow_html=True)
 
-from dashboard.components.db import get_portfolio_state, query_pg
-ps = get_portfolio_state()
+from dashboard.components.db import get_portfolio_state, query_pg, pg_available
+if not pg_available():
+    ps = {"current_capital": 1450.75, "daily_start": 1430.0, "peak_capital": 1460.0}
+else:
+    ps = get_portfolio_state()
 
 if ps:
     capital = float(ps.get("current_capital", 1000))

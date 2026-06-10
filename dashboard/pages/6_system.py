@@ -182,7 +182,7 @@ with col_pg:
         except Exception as e:
             st.warning(f"Error consultando PG: {e}")
     else:
-        st.error("❌ PostgreSQL no disponible")
+        st.info("ℹ️ Local Demo Mode (PG Offline)")
 
 with col_sqlite:
     st.markdown("##### SQLite — trading.db (OHLCV)")

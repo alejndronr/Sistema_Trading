@@ -133,17 +133,23 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">🌐 CycleDetector — Estado por Par</div>', unsafe_allow_html=True)
 
-# Intentar leer datos reales del ciclo desde PostgreSQL
 cycle_data_raw = []
 try:
-    from dashboard.components.db import query_pg
-    cycle_df = query_pg(
-        "SELECT symbol, phase, conviction, rsi_daily, rsi_weekly, pct_from_ath FROM cycle_state ORDER BY symbol"
-    )
-    if not cycle_df.empty:
-        cycle_data_raw = cycle_df.to_dict("records")
+    if pg_available():
+        from dashboard.components.db import query_pg
+        cycle_df = query_pg(
+            "SELECT symbol, phase, conviction, rsi_daily, rsi_weekly, pct_from_ath FROM cycle_state ORDER BY symbol"
+        )
+        if not cycle_df.empty:
+            cycle_data_raw = cycle_df.to_dict("records")
+    else:
+        cycle_data_raw = [
+            {"symbol": "BTC/USDC", "phase": "BULL_MATURE", "conviction": 85, "rsi_daily": 65.4, "rsi_weekly": 72.1, "pct_from_ath": -0.05},
+            {"symbol": "ETH/USDC", "phase": "BULL_EARLY", "conviction": 70, "rsi_daily": 58.2, "rsi_weekly": 60.5, "pct_from_ath": -0.25},
+            {"symbol": "SOL/USDC", "phase": "ACCUMULATION", "conviction": 60, "rsi_daily": 45.1, "rsi_weekly": 50.0, "pct_from_ath": -0.40}
+        ]
 except Exception:
-    pass  # Usar demo si no hay tabla
+    pass
 
 render_cycle_panel(cycle_data_raw)
 
@@ -212,9 +218,11 @@ else:
         color = "color: #00C851" if val >= 0 else "color: #FF4444"
         return color
 
-    styled = pos_df.drop(columns=["Progress"]).style\
-        .format({"PnL $": "${:,.2f}", "PnL %": "{:.2f}%"})\
-        .applymap(color_pnl, subset=["PnL $", "PnL %"])
+    df_to_style = pos_df.drop(columns=["Progress"])
+    if hasattr(df_to_style.style, "map"):
+        styled = df_to_style.style.format({"PnL $": "${:,.2f}", "PnL %": "{:.2f}%"}).map(color_pnl, subset=["PnL $", "PnL %"])
+    else:
+        styled = df_to_style.style.format({"PnL $": "${:,.2f}", "PnL %": "{:.2f}%"}).applymap(color_pnl, subset=["PnL $", "PnL %"])
 
     st.dataframe(styled, use_container_width=True, height=250)
 
