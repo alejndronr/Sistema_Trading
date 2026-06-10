@@ -44,9 +44,15 @@ if not pg_available():
         "duration_hours": np.random.uniform(2, 48, 100)
     })
     
+    eq_values = np.linspace(1400, 1450.75, 100) + np.cumsum(np.random.randn(100)*2)
+    peak = np.maximum.accumulate(eq_values)
+    drawdown = (peak - eq_values) / peak
+    
     eq_df = pd.DataFrame({
-        "timestamp": mock_dates,
-        "equity": np.linspace(1400, 1450.75, 100) + np.cumsum(np.random.randn(100)*2)
+        "entry_time": mock_dates,
+        "equity": eq_values,
+        "pnl": df["pnl"].values,
+        "drawdown": drawdown
     })
 m = compute_metrics(df)
 

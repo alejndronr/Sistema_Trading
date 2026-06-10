@@ -187,11 +187,13 @@ else:
             pnl_pct = (curr / entry - 1) * 100 if entry > 0 else 0
             tp1_dist = (tp1 - entry) if tp1 > 0 else 0
             curr_dist = (curr - entry)
-            progress = min(1.0, curr_dist / tp1_dist) if tp1_dist > 0 else 0
+            progress = max(0.0, min(1.0, curr_dist / tp1_dist)) if tp1_dist > 0 else 0.0
         else:
             pnl = (entry - curr) * units
             pnl_pct = (entry / curr - 1) * 100 if curr > 0 else 0
-            progress = 0.0
+            tp1_dist = (entry - tp1) if entry > tp1 > 0 else 0
+            curr_dist = (entry - curr)
+            progress = max(0.0, min(1.0, curr_dist / tp1_dist)) if tp1_dist > 0 else 0.0
 
         tp1_hit = bool(row.get("tp1_hit", False))
         ml_p = row.get("ml_proba", None)
