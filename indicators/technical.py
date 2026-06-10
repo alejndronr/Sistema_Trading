@@ -117,11 +117,9 @@ def _ts_momentum(close: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Seri
     # Pendiente: Cambio de precio promedio por vela
     slope = (close - close.shift(period)) / period
     
-    # Standard Error proxy: volatilidad normalizada por raiz del periodo
-    se = close.rolling(period).std() / np.sqrt(period)
+    # T-Stat proxy: Z-score del momentum (amplitud comparable al t-stat real)
+    t_stat = (close - close.shift(period)) / (close.rolling(period).std() + 1e-8)
     
-    # T-Stat proxy
-    t_stat = slope / se.replace(0, np.nan)
     return slope.fillna(0.0), t_stat.fillna(0.0)
 
 def _regime_hmm_proxy(close: pd.Series, atr: pd.Series, period: int = 60) -> pd.DataFrame:
