@@ -178,6 +178,7 @@ class CycleDetector:
 
         # Media 200 días
         sma_200d = float(close.rolling(min(200, len(close))).mean().iloc[-1])
+        above_200d = price > ema_200d
         
         # Proxy de 200W SMA (aprox 1400 días). Si no hay 1400 días, usar lo máximo posible.
         sma_200w = float(close.rolling(min(1400, len(close))).mean().iloc[-1])
@@ -256,6 +257,7 @@ class CycleDetector:
         rsi_28d = float(self._rsi(close, 28).iloc[idx])
         
         pct_from_ath = (price - ath_period) / ath_period
+        days_since_ath = max(0, (now - ath_date).days)
         
         # Aproximación del RSI semanal y tendencia para ese día
         close_w = df_w[df_w.index <= now]["close"].astype(float)
