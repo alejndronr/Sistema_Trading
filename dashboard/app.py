@@ -71,22 +71,18 @@ st.markdown("*Selecciona una página del sidebar izquierdo para comenzar.*")
 
 # Mostrar estado rápido
 from dashboard.components.db import get_heartbeat, pg_available
-import datetime
 
-col1, col2, col3 = st.columns(3)
+pg_ok = pg_available()
+hb = get_heartbeat()
 
-with col1:
-    if pg_available():
-        st.success("✅ PostgreSQL conectado")
-    else:
-        st.error("❌ PostgreSQL no disponible — modo demo")
+pg_pill = f"""<div class="status-pill status-{'success' if pg_ok else 'warning'}">
+    <div class="pulsing-dot" style="color: {'#34D399' if pg_ok else '#FBBF24'}"></div>
+    {'PostgreSQL Live' if pg_ok else 'Local Demo Mode'}
+</div>"""
 
-with col2:
-    hb = get_heartbeat()
-    if hb:
-        st.success(f"✅ Motor: {hb.get('engine_version', 'V6')}")
-    else:
-        st.warning("⚠️ Motor offline o sin heartbeat")
+engine_pill = f"""<div class="status-pill status-{'success' if hb else 'warning'}">
+    <div class="pulsing-dot" style="color: {'#34D399' if hb else '#FBBF24'}"></div>
+    {'Engine Active (' + hb.get('engine_version', 'V6') + ')' if hb else 'Engine Offline (Demo)'}
+</div>"""
 
-with col3:
-    st.info(f"🕐 {datetime.datetime.now().strftime('%H:%M:%S')}")
+st.markdown(f'<div style="display: flex; gap: 10px; margin-bottom: 2rem;">{pg_pill}{engine_pill}</div>', unsafe_allow_html=True)

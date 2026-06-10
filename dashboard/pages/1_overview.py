@@ -81,25 +81,50 @@ metrics_30d = compute_metrics_30d(trades_df)
 open_pos = get_open_positions()
 equity_df = get_equity_curve()
 
-capital = ps.get("current_capital", 1000.0) if ps else 1000.0
-initial = ps.get("daily_start", capital) if ps else capital
-pnl_total = metrics_30d["total_pnl"]
-pnl_today = (capital - initial) if ps else 0.0
-max_dd = metrics_30d["max_dd_pct"] * 100
+if not pg_available():
+    # ── Local Demo Mode Mock Data ──
+    capital = 1450.75
+    pnl_total = 450.75
+    pnl_today = 35.20
+    max_dd = 8.2
+    win_rate = 45.3
+    profit_factor = 1.48
+    
+    open_pos = pd.DataFrame([
+        {"symbol": "BTC/USDC", "entry_price": 64500, "direction": "LONG", "stop_loss": 62000, "tp1": 68000, "units": 0.015, "strategy": "TrendFollowing", "tp1_hit": False, "ml_proba": 0.65},
+        {"symbol": "ETH/USDC", "entry_price": 3200, "direction": "LONG", "stop_loss": 3100, "tp1": 3400, "units": 0.5, "strategy": "MeanReversion", "tp1_hit": True, "ml_proba": 0.55}
+    ])
+    
+    dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=24, freq="1H")
+    equity_df = pd.DataFrame({
+        "timestamp": dates,
+        "capital": np.linspace(1400, 1450.75, 24) + np.random.randn(24)*5
+    })
+    total_trades = 142
+else:
+    capital = ps.get("current_capital", 1000.0) if ps else 1000.0
+    initial = ps.get("daily_start", capital) if ps else capital
+    pnl_total = metrics_30d["total_pnl"]
+    pnl_today = (capital - initial) if ps else 0.0
+    max_dd = metrics_30d["max_dd_pct"] * 100
+    win_rate = metrics_30d["win_rate"] * 100
+    profit_factor = metrics_30d["profit_factor"]
+    total_trades = len(trades_df)
 
-k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
-
-k1.metric("💰 Capital", f"${capital:,.2f}")
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("💰 Capital", f"${capital:,.2f}")
 delta_pnl = f"+${pnl_total:,.2f}" if pnl_total >= 0 else f"-${abs(pnl_total):,.2f}"
-k2.metric("📈 PnL Total", f"${pnl_total:,.2f}", delta=delta_pnl)
-
+col_b.metric("📈 PnL Total", f"${pnl_total:,.2f}", delta=delta_pnl)
 delta_today = f"+${pnl_today:,.2f}" if pnl_today >= 0 else f"-${abs(pnl_today):,.2f}"
-k3.metric("📅 PnL Hoy", f"${pnl_today:,.2f}", delta=delta_today)
-k4.metric("📉 Max DD", f"{max_dd:.1f}%", delta=f"-{max_dd:.1f}%")
-k5.metric("🎯 Win Rate 30d", f"{metrics_30d['win_rate']*100:.1f}%")
-k6.metric("⚡ P. Factor 30d", f"{metrics_30d['profit_factor']:.2f}")
-k7.metric("📂 Trades abiertos", len(open_pos) if not open_pos.empty else 0)
-k8.metric("📊 Total trades", len(trades_df))
+col_c.metric("📅 PnL Hoy", f"${pnl_today:,.2f}", delta=delta_today)
+col_d.metric("📉 Max DD", f"{max_dd:.1f}%", delta=f"-{max_dd:.1f}%", delta_color="inverse")
+
+st.markdown("<br>", unsafe_allow_html=True)
+col_e, col_f, col_g, col_h = st.columns(4)
+col_e.metric("🎯 Win Rate 30d", f"{win_rate:.1f}%")
+col_f.metric("⚡ P. Factor 30d", f"{profit_factor:.2f}")
+col_g.metric("📂 Trades abiertos", len(open_pos) if not open_pos.empty else 0)
+col_h.metric("📊 Total trades", total_trades)
 
 st.divider()
 
@@ -139,7 +164,12 @@ else:
     for _, row in open_pos.iterrows():
         sym = row.get("symbol", "")
         entry = float(row.get("entry_price", 0))
-        curr = current_prices.get(sym, entry)
+        
+        if pg_available():
+            curr = current_prices.get(sym, entry)
+        else:
+            curr = entry * (1 + np.random.uniform(-0.02, 0.05)) # Mock real-time price
+            
         sl = float(row.get("stop_loss", 0))
         tp1 = float(row.get("tp1", 0))
         tp2 = row.get("tp2")

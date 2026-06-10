@@ -94,7 +94,10 @@ def phase_color_style(val):
     return f"background-color: {color}20; color: {color}; font-weight: bold"
 
 if not tbl_df.empty:
-    styled_tbl = tbl_df.style.applymap(phase_color_style, subset=["Fase"])
+    if hasattr(tbl_df.style, "map"):
+        styled_tbl = tbl_df.style.map(phase_color_style, subset=["Fase"])
+    else:
+        styled_tbl = tbl_df.style.applymap(phase_color_style, subset=["Fase"])
     st.dataframe(styled_tbl, use_container_width=True, hide_index=True)
 
 st.divider()

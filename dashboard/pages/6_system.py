@@ -200,7 +200,8 @@ with col_sqlite:
             ).dt.strftime("%Y-%m-%d")
 
             now_ms = int(time.time() * 1000)
-            ohlcv_summary["stale"] = (now_ms - ohlcv_summary["last_ts"]) > 86400000 * 2
+            last_ts_numeric = pd.to_numeric(ohlcv_summary["last_ts"], errors="coerce").fillna(0)
+            ohlcv_summary["stale"] = (now_ms - last_ts_numeric) > 86400000 * 2
 
             def color_stale(val):
                 return "color: #FF4444" if val else "color: #00C851"

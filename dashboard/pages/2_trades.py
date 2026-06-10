@@ -41,7 +41,30 @@ with st.sidebar:
         key="trade_date_range",
     )
 
+    from dashboard.components.db import pg_available
+    
     df_all = get_trades(limit=5000, real_only=False)
+    
+    if not pg_available():
+        np.random.seed(42)
+        mock_dates = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=150, freq="12H")
+        df_all = pd.DataFrame({
+            "entry_time": mock_dates,
+            "symbol": np.random.choice(["BTC/USDC", "ETH/USDC", "SOL/USDC"], 150),
+            "strategy": np.random.choice(["TrendFollowing", "MeanReversion", "Breakout"], 150),
+            "regime": np.random.choice(["BULL_MATURE", "BULL_EARLY", "BEAR_DEEP", "ACCUMULATION"], 150),
+            "setup_quality": np.random.choice(["A+", "A", "B", "C"], 150),
+            "direction": np.random.choice(["long", "short"], 150),
+            "is_backtest": np.random.choice([True, False], 150),
+            "pnl": np.random.randn(150) * 12,
+            "pnl_usd": np.random.randn(150) * 12,
+            "r_multiple": np.random.randn(150) * 1.2,
+            "ml_proba": np.random.uniform(0.4, 0.85, 150),
+            "exit_reason": np.random.choice(["tp1_partial", "stop_loss", "tp2", "trailing_stop"], 150),
+            "duration_hours": np.random.uniform(2, 72, 150),
+            "entry_price": np.random.uniform(2000, 65000, 150),
+            "stop_loss": np.random.uniform(1900, 64000, 150)
+        })
 
     symbols_available = ["Todos"] + sorted(df_all["symbol"].dropna().unique().tolist()) if not df_all.empty else ["Todos"]
     strategies_available = ["Todos"] + sorted(df_all["strategy"].dropna().unique().tolist()) if not df_all.empty else ["Todos"]
@@ -63,7 +86,7 @@ with st.sidebar:
 df = df_all.copy() if not df_all.empty else pd.DataFrame()
 
 if df.empty:
-    st.warning("⚠️ Sin datos de trades. Comprueba la conexión a PostgreSQL.")
+    st.warning("⚠️ Sin datos de trades para los filtros seleccionados.")
     st.stop()
 
 # Fecha
