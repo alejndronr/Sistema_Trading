@@ -106,9 +106,11 @@ def equity_curve_chart(df: pd.DataFrame, period: str = "ALL") -> go.Figure:
     ), row=2, col=1)
 
     fig.update_layout(
-        **_layout(height=500, showlegend=True, legend=dict(orientation="h", y=1.05)),
-        yaxis=dict(title="Capital USD", tickformat="$,.0f", showgrid=True, gridcolor=COLORS["grid"]),
-        yaxis2=dict(title="Drawdown %", tickformat=".1f", showgrid=True, gridcolor=COLORS["grid"]),
+        **_layout(
+            height=500, showlegend=True, legend=dict(orientation="h", y=1.05),
+            yaxis=dict(title="Capital USD", tickformat="$,.0f", showgrid=True, gridcolor=COLORS["grid"]),
+            yaxis2=dict(title="Drawdown %", tickformat=".1f", showgrid=True, gridcolor=COLORS["grid"])
+        )
     )
     return fig
 
