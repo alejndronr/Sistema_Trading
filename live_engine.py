@@ -1541,7 +1541,9 @@ async def _main():
         await engine.start()
     except KeyboardInterrupt:
         await engine.shutdown("KeyboardInterrupt")
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         await engine.shutdown("fatal_error")
         sys.exit(1)
 

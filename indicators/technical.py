@@ -110,26 +110,18 @@ def _ts_momentum(close: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Seri
     # Usaremos una aproximación rápida con la diferencia entre la EMA rápida y lenta normalizada
     # o implementamos una regresión lineal rolling de pandas pura.
     
-    # Solución 100% vectorizada para rolling slope:
-    # slope = cov(x, y) / var(x)
-    sum_x = np.sum(x)
-    sum_x2 = np.sum(x**2)
+    # Solución ultra-rápida (Atom E3950 proxy de momentum)
+    # En lugar de regresión lineal completa, usamos el ratio de la EMA rápida vs lenta
+    # o simplemente (close - close.shift(period)) / period como slope
     
-    def calc_slope(y):
-        n = len(y)
-        if n < period: return 0.0
-        sum_y = np.sum(y)
-        sum_xy = np.sum(x * y)
-        numerator = n * sum_xy - sum_x * sum_y
-        denominator = n * sum_x2 - sum_x**2
-        return numerator / denominator if denominator != 0 else 0.0
-        
-    # Pandas rolling apply (with raw=True it compiles to C and is extremely fast)
-    slope = close.rolling(period).apply(calc_slope, raw=True)
+    # Pendiente: Cambio de precio promedio por vela
+    slope = (close - close.shift(period)) / period
     
-    # Para el t-stat, simplificamos: slope / standard_error
-    # T-stat proxy:
-    t_stat = slope / (close.rolling(period).std() / np.sqrt(period))
+    # Standard Error proxy: volatilidad normalizada por raiz del periodo
+    se = close.rolling(period).std() / np.sqrt(period)
+    
+    # T-Stat proxy
+    t_stat = slope / se.replace(0, np.nan)
     return slope.fillna(0.0), t_stat.fillna(0.0)
 
 def _regime_hmm_proxy(close: pd.Series, atr: pd.Series, period: int = 60) -> pd.DataFrame:
