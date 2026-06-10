@@ -1542,8 +1542,7 @@ async def _main():
     except KeyboardInterrupt:
         await engine.shutdown("KeyboardInterrupt")
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        log.exception("fatal_error_traceback", error=str(e))
         await engine.shutdown("fatal_error")
         sys.exit(1)
 
