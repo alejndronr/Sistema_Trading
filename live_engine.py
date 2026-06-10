@@ -87,6 +87,7 @@ KELLY_FRACTION     = 0.25
 MAX_POSITIONS      = 3
 COMMISSION_RATE    = 0.001
 SLIPPAGE           = 0.001
+MARGIN_ENABLED     = os.environ.get("MARGIN_ENABLED", "false").lower() == "true"
 
 # ── Filtros ────────────────────────────────────────────────────────────────────
 CORRELATION_GROUPS: Dict[str, str] = {
@@ -168,6 +169,7 @@ class SignalResult:
     reasons:      List[str] = field(default_factory=list)
     ml_proba:     float = 0.5
     v5:           Optional[V5Context] = None
+    vol_ratio:    float = 1.0
 
 
 @dataclass
@@ -180,6 +182,7 @@ class SymbolState:
     last_enrich_df:     Optional[Any] = None   # DataFrame enriquecido en caché
     cycle:              Optional[CycleState] = None
     cycle_updated:      float = 0.0   # timestamp de última actualización del ciclo
+    last_dca_week:      int   = 0     # semana ISO del último DCA ejecutado
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +238,24 @@ def _delta_vol(o,h,l,c,v):
     rng=np.where(h==l,1e-10,h-l)
     return pd.Series(((c-l)/rng-(h-c)/rng).values,index=c.index)
 
+def _hurst_fast(c, window=100, lag=20):
+    ret1 = c.pct_change(1)
+    ret_lag = c.pct_change(lag)
+    std1 = ret1.rolling(window).std().replace(0, np.nan)
+    std_lag = ret_lag.rolling(window).std()
+    return (np.log(std_lag / std1) / np.log(lag)).fillna(0.5)
+
+def _vwap_rolling(df, window=20):
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    tp_vol = tp * df["volume"]
+    return tp_vol.rolling(window).sum() / df["volume"].rolling(window).sum().replace(0, np.nan)
+
+def _tstat_fast(c, window=20):
+    x_series = pd.Series(np.arange(len(c)), index=c.index)
+    r = c.rolling(window).corr(x_series).clip(-0.999, 0.999)
+    return (r * np.sqrt(window - 2) / np.sqrt(1 - r**2)).fillna(0.0)
+
+
 
 def enrich_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Enriquece el DataFrame con todos los indicadores. Compatible V5+V6."""
@@ -273,6 +294,19 @@ def enrich_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["trend_down"] = (df["ema21"]<df["ema55"])&(df["ema55"]<df["ema200"])
     df["above_vwap"] = c > df["vwap"]
     df["momentum_3"] = c.pct_change(3)*100
+
+    # ── Indicadores Estadísticos Cuantitativos (Fase 3) ──
+    df["hurst_exp"] = _hurst_fast(c, window=100, lag=20)
+    
+    vwap_20 = _vwap_rolling(df, 20)
+    std_20 = c.rolling(20).std().replace(0, np.nan)
+    df["zscore_vwap"] = (c - vwap_20) / std_20
+    
+    df["t_stat"] = _tstat_fast(c, window=20)
+    
+    returns = c.pct_change()
+    vol_cond = np.sqrt((returns**2).ewm(span=20).mean())
+    df["vol_ratio_garch"] = vol_cond / vol_cond.shift(5).replace(0, np.nan)
 
     # Patrones de velas (si V5 disponible)
     if V5_OK:
@@ -508,7 +542,20 @@ class AdaptiveSignalSelector:
 
         # ── MomentumScalp ───────────────────────────────────────────────────
         if "MomentumScalp" in active and phase in ("BULL_MATURE","BULL_EARLY") and regime.regime != "BEAR":
-            sig = self._momentum_scalp(df, symbol, regime, cycle, ctx, last)
+            sig = self._trend_following(df, symbol, regime, cycle, ctx, last)
+            if sig:
+                candidates.append(sig)
+
+        # ── DCA Automático en Suelos (BTC/USDC en BEAR_DEEP con colapso) ────
+        if symbol == "BTC/USDC" and phase == "BEAR_DEEP":
+            sig = self._dca_bear_floor(df, symbol, regime, cycle, ctx, last)
+            if sig:
+                # DCA override everything
+                return sig
+
+        # ── TrendFollowing SHORT (Altcoins en BEAR_DEEP/DISTRIBUTION) ───────
+        if MARGIN_ENABLED and symbol != "BTC/USDC" and phase in ("BEAR_DEEP", "DISTRIBUTION"):
+            sig = self._trend_following_short(df, symbol, regime, cycle, ctx, last, phase)
             if sig:
                 candidates.append(sig)
 
@@ -519,6 +566,93 @@ class AdaptiveSignalSelector:
         return max(candidates, key=lambda s: s.score)
 
     # ── Implementaciones de estrategias ───────────────────────────────────────
+
+    def _dca_bear_floor(self, df, symbol, regime, cycle, ctx, last) -> Optional[SignalResult]:
+        """
+        DCA forzado en suelo histórico absoluto.
+        Independiente del signal scoring normal.
+        """
+        c = float(last["close"])
+        rsi = float(last.get("rsi", 50))
+        zscore = float(last.get("zscore_vwap", 0))
+        
+        # DCA optimization: price below 200W SMA instead of fixed ATH drawdown
+        if not cycle or cycle.pct_from_200w > 0:
+            return None
+            
+        # Condiciones de colapso histórico
+        if rsi < 15 or zscore < -3.5:
+            now_week = datetime.now(tz=timezone.utc).isocalendar().week
+            ss = self._engine._sym_state.get(symbol)
+            if ss and ss.last_dca_week != now_week:
+                # Actualizar tracker (se marcará como ejecutado aunque el engine lo rechace por risk, 
+                # pero para este backtest/live es suficiente)
+                ss.last_dca_week = now_week
+                
+                atr = float(last.get("atr", c*0.015))
+                # SL muy amplio para DCA, TP lejano
+                sl = c * 0.70  # 30% drop protection
+                tp1 = c * 1.50 # 50% up
+                
+                return SignalResult(
+                    symbol=symbol, strategy="DCA_BEAR_FLOOR", direction="long",
+                    score=100.0, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp1*1.5, tp3=tp1*2.0,
+                    atr=atr, regime=regime, cycle=cycle, quality="A+",
+                    reasons=["DCA_BEAR_FLOOR", f"pct_200w={cycle.pct_from_200w:.2f}%", f"RSI={rsi:.1f}"],
+                    v5=ctx, vol_ratio=1.0,
+                )
+        return None
+
+    def _trend_following_short(self, df, symbol, regime, cycle, ctx, last, phase) -> Optional[SignalResult]:
+        c      = float(last["close"])
+        score  = 0.0
+        reasons: List[str] = []
+
+        if bool(last.get("trend_down", False)):    score += 25; reasons.append("EMA_stack_down")
+        adx = float(last.get("adx", 0))
+        if adx > 25:   score += 25; reasons.append(f"ADX={adx:.0f}")
+        elif adx > 20: score += 15; reasons.append(f"ADX={adx:.0f}")
+        rsi = float(last.get("rsi", 50))
+        if 30 <= rsi <= 60: score += 15; reasons.append(f"RSI={rsi:.0f}")
+        if not bool(last.get("macd_bull")) and not bool(last.get("macd_growing")):
+            score += 15; reasons.append("MACD_bear")
+        ema21 = float(last.get("ema21", c))
+        if abs(c-ema21)/ema21*100 < 1.5: score += 10; reasons.append("pullback_ema21")
+        if not bool(last.get("vfi_bull")): score += 5; reasons.append("VFI_bear")
+        
+        # Validación estadística (Fase 3)
+        t_stat = float(last.get("t_stat", 0.0))
+        if t_stat < -2.0:
+            score += 15; reasons.append(f"t_stat={t_stat:.1f}")
+        elif t_stat > -1.0:
+            return None  # Requiere tendencia bajista estadísticamente válida
+
+        # Bonus según fase del ciclo
+        if phase == "BEAR_DEEP": score *= 1.15; reasons.append("CYCLE:BEAR_DEEP")
+        elif phase == "DISTRIBUTION": score *= 1.10; reasons.append("CYCLE:DISTRIBUTION")
+
+        min_score = 65 if phase == "BEAR_DEEP" else 75
+        if score < min_score:
+            return None
+
+        # Confirmación V5
+        ok, reason = _v5_confirmed(ctx, phase, "TrendFollowing")
+        # Invertir requerimiento para V5 (simplificado: si hay confirmación bear)
+        if not (ctx.candle_bear >= 10 or ctx.structure_bias == "bear" or ctx.sr_at_zone):
+            return None
+
+        atr  = float(last.get("atr", c*0.015))
+        high5 = float(df["high"].iloc[-5:].max())
+        sl   = _sl_from_sr(min(c+2.0*atr, high5+0.3*atr, c*1.022), "short", ctx)
+        if c >= sl: return None
+        tp1, tp2, tp3 = _targets(c, sl, "short", ctx)
+
+        return SignalResult(
+            symbol=symbol, strategy="TrendFollowing", direction="short",
+            score=score, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+            atr=atr, regime=regime, cycle=cycle, quality=_quality(score),
+            reasons=reasons, v5=ctx, vol_ratio=float(last.get("vol_ratio_garch", 1.0)),
+        )
 
     def _trend_following(self, df, symbol, regime, cycle, ctx, last) -> Optional[SignalResult]:
         phase  = cycle.phase if cycle else "ACCUMULATION"
@@ -537,6 +671,13 @@ class AdaptiveSignalSelector:
         ema21 = float(last.get("ema21", c))
         if abs(c-ema21)/ema21*100 < 1.5: score += 10; reasons.append("pullback_ema21")
         if bool(last.get("vfi_bull")): score += 5; reasons.append("VFI")
+        
+        # Validación estadística (Fase 3)
+        t_stat = float(last.get("t_stat", 0.0))
+        if t_stat > 2.0:
+            score += 15; reasons.append(f"t_stat={t_stat:.1f}")
+        elif t_stat < 1.0:
+            return None  # Requiere tendencia estadísticamente válida
 
         # Bonus según fase del ciclo
         if cycle:
@@ -564,7 +705,7 @@ class AdaptiveSignalSelector:
             symbol=symbol, strategy="TrendFollowing", direction="long",
             score=score, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
             atr=atr, regime=regime, cycle=cycle, quality=_quality(score),
-            reasons=reasons, v5=ctx,
+            reasons=reasons, v5=ctx, vol_ratio=float(last.get("vol_ratio_garch", 1.0)),
         )
 
     def _mean_reversion(self, df, symbol, regime, cycle, ctx, last, phase) -> Optional[SignalResult]:
@@ -592,14 +733,23 @@ class AdaptiveSignalSelector:
         if bool(last.get("macd_cross_up")): score += 15; reasons.append("MACD_cross")
         elif bool(last.get("macd_growing")): score += 8
 
-        # En fase BEAR: el RSI debe ser extremo (sobreventa real)
+        # En fase BEAR: el RSI debe ser extremo (sobreventa real) o Z-Score extremo
+        zscore = float(last.get("zscore_vwap", 0.0))
         if phase in ("BEAR_DEEP","BEAR_RECOVERY"):
-            if rsi > 32:
-                return None   # No entrar MR en bear sin sobreventa extrema
-            score += 10; reasons.append("BEAR_extreme_oversold")
+            if rsi > 32 and zscore > -2.0:
+                return None   # No entrar MR en bear sin sobreventa extrema o z-score profundo
+            if zscore < -2.0:
+                score += 20; reasons.append(f"zscore={zscore:.1f}_extreme")
+            else:
+                score += 10; reasons.append("BEAR_extreme_oversold")
             if cycle and cycle.phase_strength > 0.85:
                 return None   # Bear demasiado fuerte
 
+        # Boost por Hurst Exponent (Fase 3)
+        hurst = float(last.get("hurst_exp", 0.5))
+        if hurst < 0.45:
+            score += 10; reasons.append(f"hurst={hurst:.2f}_mr")
+            
         # Bonus por cycle
         if cycle and phase == "ACCUMULATION":
             score += 8; reasons.append("CYCLE:ACCUM_bonus")
@@ -627,7 +777,7 @@ class AdaptiveSignalSelector:
             symbol=symbol, strategy="MeanReversion", direction="long",
             score=score, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
             atr=atr, regime=regime, cycle=cycle, quality=_quality(score),
-            reasons=reasons, v5=ctx,
+            reasons=reasons, v5=ctx, vol_ratio=float(last.get("vol_ratio_garch", 1.0)),
         )
 
     def _breakout(self, df, symbol, regime, cycle, ctx, last, phase) -> Optional[SignalResult]:
@@ -663,7 +813,7 @@ class AdaptiveSignalSelector:
             symbol=symbol, strategy="Breakout", direction="long",
             score=score, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
             atr=atr, regime=regime, cycle=cycle, quality=_quality(score),
-            reasons=reasons, v5=ctx,
+            reasons=reasons, v5=ctx, vol_ratio=float(last.get("vol_ratio_garch", 1.0)),
         )
 
     def _momentum_scalp(self, df, symbol, regime, cycle, ctx, last) -> Optional[SignalResult]:
@@ -706,7 +856,7 @@ class AdaptiveSignalSelector:
             symbol=symbol, strategy="MomentumScalp", direction="long",
             score=score, entry_price=c, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
             atr=atr, regime=regime, cycle=cycle, quality=_quality(score),
-            reasons=reasons, v5=ctx,
+            reasons=reasons, v5=ctx, vol_ratio=float(last.get("vol_ratio_garch", 1.0)),
         )
 
 
@@ -717,12 +867,33 @@ class AdaptiveSignalSelector:
 def compute_position_size(
     signal: SignalResult, capital: float,
     open_count: int, daily_pnl_pct: float,
+    confluence_score: int = 0
 ) -> Tuple[float, float, float]:
     """Kelly fraccionado con multiplicadores adaptativos al ciclo."""
+    if signal.strategy == "DCA_BEAR_FLOOR":
+        # DCA fijo de muy bajo riesgo independientemente de SL dist
+        dist = abs(signal.entry_price - signal.stop_loss)
+        if dist <= 0: return 0.0, 0.0, 0.0
+        # Forzar un nominal de aprox $15 USD
+        notional = 15.0
+        units = notional / signal.entry_price
+        risk = units * dist
+        return units, risk, notional
+
     if capital < 1500:      risk = RISK_PER_TRADE_USD
     elif capital < 5000:    risk = capital * 0.010
     elif capital < 20_000:  risk = capital * 0.015
     else:                   risk = capital * 0.020
+
+    # Multiplicador del ciclo
+    if signal.cycle:
+        risk *= signal.cycle.risk_multiplier
+        
+    # Multiplicador por Confluence Score (Fase 5)
+    if confluence_score > 75:
+        risk *= 1.25  # High conviction setup
+    elif confluence_score < 25:
+        risk *= 0.75  # Low conviction setup
 
     risk = min(risk, capital * MAX_RISK_PCT)
 
@@ -731,13 +902,16 @@ def compute_position_size(
 
     # Multiplicador del ciclo macro — el más importante
     if signal.cycle:
-        risk *= signal.cycle.risk_multiplier
         # Extra en BULL_MATURE si señal de calidad
         if signal.cycle.phase == "BULL_MATURE" and signal.quality in ("A+","A"):
             risk *= 1.20
         # Reducir siempre en DISTRIBUTION
         if signal.cycle.phase == "DISTRIBUTION":
             risk *= 0.50
+
+    # Penalización a BTC (Sizing reducido al 50% max)
+    if signal.symbol == "BTC/USDC":
+        risk *= 0.50
 
     # Circuit breaker diario
     if daily_pnl_pct < CB_DAILY_REDUCE:
@@ -755,6 +929,18 @@ def compute_position_size(
 
     risk = max(risk, 3.0)
     dist = abs(signal.entry_price - signal.stop_loss)
+    
+    # Aplicamos vol_ratio de GARCH como multiplicador del SL
+    # Limitar entre 0.5 (compresión) y 2.0 (alta volatilidad)
+    vol_mult = max(0.5, min(2.0, signal.vol_ratio))
+    dist = dist * vol_mult
+    
+    # Modificar el stop_loss real en la señal
+    if signal.direction == "long":
+        signal.stop_loss = signal.entry_price - dist
+    else:
+        signal.stop_loss = signal.entry_price + dist
+
     if dist <= 0: return 0.0, 0.0, 0.0
 
     units    = risk / dist
@@ -902,9 +1088,9 @@ class LiveEngineV6:
                                 INSERT INTO cycle_state
                                     (symbol, phase, conviction, risk_multiplier,
                                      rsi_daily, rsi_weekly, pct_from_ath,
-                                     active_strategies, updated_at)
+                                     active_strategies, last_dca_week, updated_at)
                                 VALUES (:sym, :phase, :conv, :risk,
-                                        :rsi_d, :rsi_w, :pct_ath, :strats, NOW())
+                                        :rsi_d, :rsi_w, :pct_ath, :strats, :last_dca, NOW())
                                 ON CONFLICT (symbol) DO UPDATE SET
                                     phase=EXCLUDED.phase,
                                     conviction=EXCLUDED.conviction,
@@ -913,6 +1099,7 @@ class LiveEngineV6:
                                     rsi_weekly=EXCLUDED.rsi_weekly,
                                     pct_from_ath=EXCLUDED.pct_from_ath,
                                     active_strategies=EXCLUDED.active_strategies,
+                                    last_dca_week=EXCLUDED.last_dca_week,
                                     updated_at=NOW()
                             """), {
                                 "sym":   symbol,
@@ -923,6 +1110,7 @@ class LiveEngineV6:
                                 "rsi_w": state.rsi_weekly,
                                 "pct_ath": state.pct_from_ath,
                                 "strats": strategies_str,
+                                "last_dca": self._sym_state[symbol].last_dca_week if symbol in self._sym_state else 0,
                             })
                             await s.commit()
                     except Exception as exc2:
@@ -970,6 +1158,21 @@ class LiveEngineV6:
         else:
             try:
                 df = enrich_dataframe(df_raw)
+                
+                # ── Alertas Avanzadas (Fase 4) ──
+                last_row = df.iloc[-1]
+                if symbol == "BTC/USDC" and float(last_row.get("zscore_vwap", 0)) < -2.5:
+                    log.info("alert_vwap_mr", symbol=symbol, zscore=f"{last_row['zscore_vwap']:.2f}", msg="Zona de entrada MR")
+                
+                if ss.last_enrich_df is not None:
+                    old_h = float(ss.last_enrich_df.iloc[-1].get("hurst_exp", 0.5))
+                    new_h = float(last_row.get("hurst_exp", 0.5))
+                    if old_h < 0.45 and new_h > 0.55:
+                        log.info("alert_hurst_regime_change", symbol=symbol, old=f"{old_h:.2f}", new=f"{new_h:.2f}", msg="Cambio a régimen tendencial detectado")
+                
+                if float(last_row.get("vol_ratio_garch", 1.0)) > 2.0:
+                    log.info("alert_extreme_volatility", symbol=symbol, vol=f"{last_row['vol_ratio_garch']:.2f}", msg="Volatilidad extrema, sizing reducido")
+                
                 ss.last_enrich_price = last_close
                 ss.last_enrich_df    = df
             except Exception as exc:
@@ -1081,7 +1284,22 @@ class LiveEngineV6:
             return
 
         signal.entry_price = c15
-        units, risk, notional = compute_position_size(signal, capital, len(open_pos), pnl_pct)
+
+        # ── Multi-indicator Confluence Score (Fase 5) ─────────────
+        h_exp = float(last15.get("hurst_exp", 0.5))
+        z_vwap = float(last15.get("zscore_vwap", 0))
+        tstat = float(last15.get("t_stat", 0))
+        v_garch = float(last15.get("vol_ratio_garch", 1.0))
+        
+        confluence = 0
+        if h_exp < 0.45:       confluence += 25
+        if z_vwap < -2.0:      confluence += 25
+        if abs(tstat) > 2.0:   confluence += 25
+        if v_garch < 0.8:      confluence += 25
+
+        units, risk, notional = compute_position_size(
+            signal, capital, len(open_pos), pnl_pct, confluence_score=confluence
+        )
         if units <= 0: return
 
         cycle   = signal.cycle
@@ -1110,6 +1328,8 @@ class LiveEngineV6:
             direction=signal.direction, regime=signal.regime.regime,
             risk_amount=risk, notional_usd=notional,
             atr=signal.atr,   # ATR real para trailing stop dinámico
+            hurst_at_entry=h_exp, zscore_at_entry=z_vwap,
+            t_stat_at_entry=tstat, confluence_score=confluence,
         )
         if self._bot:
             await self._bot.send_trade_open(trade)

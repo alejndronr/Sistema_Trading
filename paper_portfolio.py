@@ -87,6 +87,7 @@ class PaperPortfolio:
             binance_order_id VARCHAR(50),
             ml_proba DECIMAL(5,4),
             atr_entry DECIMAL(18,8) DEFAULT 0,  -- ATR real en el momento de apertura
+            regime VARCHAR(30),
             status VARCHAR(20) DEFAULT 'open'
         );
 
@@ -104,17 +105,14 @@ class PaperPortfolio:
             stop_loss DECIMAL(18,8),
             tp1 DECIMAL(18,8),
             tp2 DECIMAL(18,8),
-            take_profit_1 DECIMAL(18,8),
+            tp2 DECIMAL(18,8),
             units DECIMAL(18,8),
-            position_size DECIMAL(18,8),
             pnl DECIMAL(10,4),
-            pnl_usd DECIMAL(10,4),
             pnl_pct DECIMAL(8,6),
             r_multiple DECIMAL(6,3),
             exit_reason VARCHAR(30),
             ml_proba DECIMAL(5,4),
             regime VARCHAR(30),
-            market_regime VARCHAR(30),
             commission_paid DECIMAL(10,6),
             setup_quality SMALLINT,
             duration_hours DECIMAL(8,2),
@@ -157,6 +155,7 @@ class PaperPortfolio:
             rsi_weekly DECIMAL(6,2),
             pct_from_ath DECIMAL(8,4),
             active_strategies TEXT,
+            last_dca_week INTEGER DEFAULT 0,
             updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
@@ -195,10 +194,14 @@ class PaperPortfolio:
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS trade_id INTEGER",
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS timeframe VARCHAR(10)",
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS direction VARCHAR(10) DEFAULT 'long'",
-            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS take_profit_1 DECIMAL(18,8)",
-            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS position_size DECIMAL(18,8)",
-            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS pnl_usd DECIMAL(10,4)",
-            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS market_regime VARCHAR(30)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp1 DECIMAL(18,8)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp2 DECIMAL(18,8)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS units DECIMAL(18,8)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS pnl DECIMAL(10,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS pnl_pct DECIMAL(8,6)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS r_multiple DECIMAL(6,3)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS commission_paid DECIMAL(10,6)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS regime VARCHAR(30)",
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS setup_quality SMALLINT",
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS duration_hours DECIMAL(8,2)",
             "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS is_backtest BOOLEAN DEFAULT FALSE",
@@ -209,6 +212,15 @@ class PaperPortfolio:
             "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS pnl_today DECIMAL(10,4) DEFAULT 0",
             "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS regimes_json TEXT",
             "ALTER TABLE system_heartbeat ADD COLUMN IF NOT EXISTS cycles_json TEXT",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS hurst_at_entry DECIMAL(6,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS zscore_at_entry DECIMAL(6,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS t_stat_at_entry DECIMAL(6,4)",
+            "ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS confluence_score INTEGER",
+            "ALTER TABLE positions ADD COLUMN IF NOT EXISTS hurst_at_entry DECIMAL(6,4)",
+            "ALTER TABLE positions ADD COLUMN IF NOT EXISTS zscore_at_entry DECIMAL(6,4)",
+            "ALTER TABLE positions ADD COLUMN IF NOT EXISTS t_stat_at_entry DECIMAL(6,4)",
+            "ALTER TABLE positions ADD COLUMN IF NOT EXISTS confluence_score INTEGER",
+            "ALTER TABLE cycle_state ADD COLUMN IF NOT EXISTS last_dca_week INTEGER DEFAULT 0",
         ]
         async with self._engine.begin() as conn:
             for stmt in migrations:
@@ -262,6 +274,10 @@ class PaperPortfolio:
         risk_amount: Optional[float] = None,
         notional_usd: Optional[float] = None,
         atr: float = 0.0,    # ATR real en el momento de apertura (para trailing stop)
+        hurst_at_entry: Optional[float] = None,
+        zscore_at_entry: Optional[float] = None,
+        t_stat_at_entry: Optional[float] = None,
+        confluence_score: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Simula apertura de una posición.
@@ -290,11 +306,13 @@ class PaperPortfolio:
                     INSERT INTO positions
                         (symbol, strategy, direction, entry_time, entry_price,
                          stop_loss, tp1, tp2, units, risk_amount, tp1_hit,
-                         remaining_units, ml_proba, atr_entry, status)
+                         remaining_units, ml_proba, atr_entry, regime, status,
+                         hurst_at_entry, zscore_at_entry, t_stat_at_entry, confluence_score)
                     VALUES
                         (:symbol, :strategy, :direction, :entry_time, :entry_price,
                          :stop_loss, :tp1, :tp2, :units, :risk_amount, FALSE,
-                         :units, :ml_proba, :atr_entry, 'open')
+                         :units, :ml_proba, :atr_entry, :regime, 'open',
+                         :hurst, :zscore, :tstat, :confluence)
                     RETURNING id
                 """),
                 {
@@ -309,7 +327,12 @@ class PaperPortfolio:
                     "units":       units,
                     "risk_amount": _risk_to_store,
                     "ml_proba":    ml_proba,
-                    "atr_entry":   atr if atr > 0 else fill_price * 0.015,  # fallback: 1.5% del precio
+                    "atr_entry":   atr if atr > 0 else fill_price * 0.015,
+                    "regime":      regime,
+                    "hurst":       hurst_at_entry,
+                    "zscore":      zscore_at_entry,
+                    "tstat":       t_stat_at_entry,
+                    "confluence":  confluence_score,
                 },
             )
             position_id = result.fetchone()[0]
@@ -528,31 +551,47 @@ class PaperPortfolio:
             await session.execute(
                 text("""
                     INSERT INTO trades_journal
-                        (symbol, strategy, entry_time, exit_time, entry_price,
-                         exit_price, stop_loss, tp1, tp2, units, pnl, pnl_pct,
-                         r_multiple, exit_reason, ml_proba, commission_paid)
+                        (trade_id, symbol, strategy, timeframe, direction,
+                         entry_time, exit_time, entry_price, exit_price,
+                         stop_loss, tp1, tp2, units, pnl, pnl_pct, r_multiple,
+                         commission_paid, regime, setup_quality, duration_hours,
+                         is_backtest, risk_amount, ml_proba, entry_reason, exit_reason, observations,
+                         hurst_at_entry, zscore_at_entry, t_stat_at_entry, confluence_score)
                     VALUES
-                        (:symbol, :strategy, :entry_time, :exit_time, :entry_price,
-                         :exit_price, :stop_loss, :tp1, :tp2, :units, :pnl, :pnl_pct,
-                         :r_multiple, :exit_reason, :ml_proba, :commission)
+                        (:tid, :sym, :strat, '1h', :dir,
+                         :et, :xt, :ep, :xp,
+                         :sl, :tp1, :tp2, :units, :pnl, :pnl_pct, :r_mult,
+                         :comm, :regime, 3, :dur,
+                         FALSE, :risk, :ml_proba, 'auto', :reason, :obs,
+                         :hurst, :zscore, :tstat, :confluence)
                 """),
                 {
-                    "symbol":       pos["symbol"],
-                    "strategy":     pos["strategy"],
-                    "entry_time":   pos["entry_time"],
-                    "exit_time":    now,
-                    "entry_price":  entry_price,
-                    "exit_price":   exit_price,
-                    "stop_loss":    pos["stop_loss"],
+                    "tid":          pos["id"],
+                    "sym":          pos["symbol"],
+                    "strat":        pos["strategy"],
+                    "dir":          direction,
+                    "et":           pos["entry_time"],
+                    "xt":           now,
+                    "ep":           entry_price,
+                    "xp":           exit_price,
+                    "sl":           pos["stop_loss"],
                     "tp1":          pos["tp1"],
                     "tp2":          pos["tp2"],
                     "units":        units,
                     "pnl":          pnl,
                     "pnl_pct":      pnl_pct,
-                    "r_multiple":   r_multiple,
-                    "exit_reason":  reason,
+                    "r_mult":       r_multiple,
+                    "comm":         commission,
+                    "regime":       pos.get("regime"),
+                    "dur":          0,
+                    "risk":         risk_amt,
                     "ml_proba":     pos.get("ml_proba"),
-                    "commission":   commission,
+                    "reason":       reason,
+                    "obs":          pos.get("observations", ""),
+                    "hurst":        pos.get("hurst_at_entry"),
+                    "zscore":       pos.get("zscore_at_entry"),
+                    "tstat":        pos.get("t_stat_at_entry"),
+                    "confluence":   pos.get("confluence_score"),
                 },
             )
             # Marcar posición como cerrada
@@ -616,10 +655,12 @@ class PaperPortfolio:
             text("""
                 INSERT INTO trades_journal
                     (symbol, strategy, entry_time, exit_time, entry_price,
-                     exit_price, units, pnl, exit_reason, ml_proba, commission_paid)
+                     exit_price, units, pnl, exit_reason, ml_proba, commission_paid,
+                     hurst_at_entry, zscore_at_entry, t_stat_at_entry, confluence_score)
                 VALUES
                     (:symbol, :strategy, :entry_time, NOW(), :entry_price,
-                     :exit_price, :units, :pnl, 'tp1_partial', :ml_proba, :commission)
+                     :exit_price, :units, :pnl, 'tp1_partial', :ml_proba, :commission,
+                     :hurst, :zscore, :tstat, :confluence)
             """),
             {
                 "symbol":      pos["symbol"],
@@ -631,6 +672,10 @@ class PaperPortfolio:
                 "pnl":         pnl,
                 "ml_proba":    pos.get("ml_proba"),
                 "commission":  commission,
+                "hurst":       pos.get("hurst_at_entry"),
+                "zscore":      pos.get("zscore_at_entry"),
+                "tstat":       pos.get("t_stat_at_entry"),
+                "confluence":  pos.get("confluence_score"),
             },
         )
         self._capital += pnl

@@ -441,6 +441,39 @@ def _compute_indicators_inline(df: pd.DataFrame) -> pd.DataFrame:
     df["ob_bull"]  = (bearish.shift(1) & bull_move).fillna(False).astype(float)
     df["fvg_bull"] = (l > h.shift(2)).fillna(False).astype(float)
 
+    # Phase 3 indicators
+    # Hurst Exponent (Variance Ratio proxy)
+    ret1 = c.pct_change(1)
+    ret_lag = c.pct_change(20)
+    std1 = ret1.rolling(100).std().replace(0, np.nan)
+    std_lag = ret_lag.rolling(100).std()
+    df["hurst_exp"] = (np.log(std_lag / std1) / np.log(20)).fillna(0.5)
+
+    # Z-Score VWAP
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    tp_vol = tp * df["volume"]
+    vwap_20 = tp_vol.rolling(20).sum() / df["volume"].rolling(20).sum().replace(0, np.nan)
+    std_20 = c.rolling(20).std().replace(0, np.nan)
+    df["zscore_vwap"] = ((c - vwap_20) / std_20).fillna(0)
+
+    # T-Stat Momentum
+    idx = np.arange(len(c))
+    x = pd.Series(idx, index=c.index)
+    x_mean = x.rolling(20).mean()
+    y_mean = c.rolling(20).mean()
+    cov = (x * c).rolling(20).mean() - x_mean * y_mean
+    var_x = (x**2).rolling(20).mean() - x_mean**2
+    beta = cov / var_x.replace(0, np.nan)
+    alpha = y_mean - beta * x_mean
+    y_pred = alpha + beta * x
+    mse = ((c - y_pred)**2).rolling(20).mean()
+    df["t_stat"] = (beta / np.sqrt(mse / var_x).replace(0, np.nan)).fillna(0)
+
+    # Proxy GARCH (EWM Variance)
+    returns = c.pct_change()
+    vol_cond = np.sqrt((returns**2).ewm(span=20).mean())
+    df["vol_ratio_garch"] = (vol_cond / vol_cond.shift(5).replace(0, np.nan)).fillna(1.0)
+
     return df
 
 

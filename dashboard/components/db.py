@@ -145,10 +145,10 @@ def get_trades(limit: int = 1000, real_only: bool = True) -> pd.DataFrame:
     sql = f"""
         SELECT
             entry_time, exit_time, symbol, strategy, direction, setup_quality,
-            COALESCE(pnl, pnl_usd) AS pnl,
-            COALESCE(units, position_size) AS units,
-            COALESCE(regime, market_regime) AS regime,
-            COALESCE(tp1, take_profit_1) AS tp1,
+            pnl,
+            units,
+            regime,
+            tp1,
             r_multiple, ml_proba, exit_reason, duration_hours,
             entry_reason, observations, entry_price, stop_loss
         FROM trades_journal

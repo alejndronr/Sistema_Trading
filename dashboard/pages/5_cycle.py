@@ -62,8 +62,8 @@ except Exception:
 if not cycle_data:
     # Datos de ejemplo para cuando el motor no está corriendo
     cycle_data = [
-        {"symbol": "BTC/USDC", "phase": "DISTRIBUTION", "conviction": 72, "rsi_daily": 62, "rsi_weekly": 65, "pct_from_ath": -0.28, "ema200_dist": 1.45},
-        {"symbol": "ETH/USDC", "phase": "BEAR_RECOVERY", "conviction": 65, "rsi_daily": 45, "rsi_weekly": 42, "pct_from_ath": -0.52, "ema200_dist": -0.12},
+        {"symbol": "BTC/USDC", "phase": "DISTRIBUTION", "conviction": 72, "rsi_daily": 62, "rsi_weekly": 65, "pct_from_ath": -0.28, "ema200_dist": 1.45, "last_dca_week": 0},
+        {"symbol": "ETH/USDC", "phase": "BEAR_RECOVERY", "conviction": 65, "rsi_daily": 45, "rsi_weekly": 42, "pct_from_ath": -0.52, "ema200_dist": -0.12, "last_dca_week": 0},
         {"symbol": "DOT/USDC", "phase": "ACCUMULATION", "conviction": 58, "rsi_daily": 48, "rsi_weekly": 50, "pct_from_ath": -0.71, "ema200_dist": -0.08},
         {"symbol": "AVAX/USDC", "phase": "ACCUMULATION", "conviction": 60, "rsi_daily": 52, "rsi_weekly": 48, "pct_from_ath": -0.60, "ema200_dist": 0.02},
         {"symbol": "ADA/USDC", "phase": "BEAR_RECOVERY", "conviction": 55, "rsi_daily": 44, "rsi_weekly": 46, "pct_from_ath": -0.68, "ema200_dist": -0.05},
@@ -82,9 +82,9 @@ for item in cycle_data:
         "RSI D": f"{item.get('rsi_daily', 0):.0f}",
         "RSI W": f"{item.get('rsi_weekly', 0):.0f}",
         "% ATH": f"{item.get('pct_from_ath', 0)*100:.1f}%",
-        "vs EMA200": f"{item.get('ema200_dist', 0)*100:.1f}%",
         "Risk Mult": f"{PHASE_RISK.get(phase, 1.0)*100:.0f}%",
         "Estrategias": ", ".join(PHASE_STRATEGIES.get(phase, ["-"])),
+        "DCA (Semana)": str(item.get("last_dca_week", 0)),
     })
 
 tbl_df = pd.DataFrame(tbl_rows)

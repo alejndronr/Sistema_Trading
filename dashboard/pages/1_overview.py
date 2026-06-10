@@ -83,7 +83,7 @@ equity_df = get_equity_curve()
 
 capital = ps.get("current_capital", 1000.0) if ps else 1000.0
 initial = ps.get("daily_start", capital) if ps else capital
-pnl_total = metrics_30d["total_pnl_usd"]
+pnl_total = metrics_30d["total_pnl"]
 pnl_today = (capital - initial) if ps else 0.0
 max_dd = metrics_30d["max_dd_pct"] * 100
 

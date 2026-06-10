@@ -46,6 +46,11 @@ FEATURES: List[str] = [
     "vol_roll10_mean",# Media rolling 10 volumen
     "ob_bull_recent5",# OB bullish reciente en 5 velas
     "fvg_bull_recent3",# FVG bullish reciente en 3 velas
+    "hurst_exp",      # Hurst Exponent (Variance Ratio proxy)
+    "zscore_vwap",    # Z-Score del VWAP
+    "t_stat",         # T-Stat de Momentum
+    "vol_ratio_garch",# Proxy GARCH de volatilidad condicional
+    "confluence_score", # Confluence score de 0 a 100
 ]
 
 MODEL_VERSION = "2.0.0"
@@ -198,6 +203,19 @@ class MetaLabeler:
         f_ob_recent = pd.Series(ob_bull).rolling(5, min_periods=1).max().values
         f_fvg_recent = pd.Series(fvg_bull).rolling(3, min_periods=1).max().values
 
+        # Phase 3 features
+        f_hurst = col("hurst_exp", 0.5)
+        f_zscore = col("zscore_vwap", 0.0)
+        f_tstat = col("t_stat", 0.0)
+        f_vol_garch = col("vol_ratio_garch", 1.0)
+
+        # Phase 5 features: Confluence Score
+        f_confluence = np.zeros(n, dtype=np.float32)
+        f_confluence += np.where(f_hurst < 0.45, 25.0, 0.0)
+        f_confluence += np.where(f_zscore < -2.0, 25.0, 0.0)
+        f_confluence += np.where(np.abs(f_tstat) > 2.0, 25.0, 0.0)
+        f_confluence += np.where(f_vol_garch < 0.8, 25.0, 0.0)
+
         # Stack en matriz
         X = np.column_stack([
             f_rsi, f_adx, f_atr_pct, f_ema21_dist, f_ema55_dist,
@@ -206,6 +224,7 @@ class MetaLabeler:
             f_rsi_lag1, f_rsi_lag3, f_adx_lag1, f_chg1, f_chg3,
             f_rsi_mean5, f_rsi_std5, f_vol_mean10,
             f_ob_recent, f_fvg_recent,
+            f_hurst, f_zscore, f_tstat, f_vol_garch, f_confluence,
         ]).astype(np.float32)  # float32 → mitad de RAM que float64
 
         # Reemplazar inf/nan

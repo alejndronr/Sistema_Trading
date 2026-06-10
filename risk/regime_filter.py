@@ -176,9 +176,12 @@ class CycleDetector:
         days_since_ath = max(0, (now - ath_date).days)
         pct_from_ath   = (price - ath_period) / ath_period
 
-        # Media 200 días como proxy de 200-week SMA
+        # Media 200 días
         sma_200d = float(close.rolling(min(200, len(close))).mean().iloc[-1])
-        pct_from_200d = (price - sma_200d) / sma_200d if sma_200d > 0 else 0
+        
+        # Proxy de 200W SMA (aprox 1400 días). Si no hay 1400 días, usar lo máximo posible.
+        sma_200w = float(close.rolling(min(1400, len(close))).mean().iloc[-1])
+        pct_from_200w = (price - sma_200w) / sma_200w if sma_200w > 0 else 0
 
         # Indicadores semanales
         df_w = self._to_weekly(df)
@@ -287,7 +290,7 @@ class CycleDetector:
             phase_strength  = round(phase_strength, 2),
             days_since_ath  = days_since_ath,
             pct_from_ath    = round(pct_from_ath * 100, 1),
-            pct_from_200w   = round(pct_from_200d * 100, 1),
+            pct_from_200w   = round(pct_from_200w * 100, 1),
             rsi_daily       = round(rsi_14d, 1),
             rsi_weekly      = round(rsi_w, 1),
             ema_200d        = round(ema_200d, 4),

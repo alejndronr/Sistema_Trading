@@ -73,7 +73,7 @@ def compute_metrics(df: pd.DataFrame) -> dict:
         "avg_loss_usd": avg_loss,
         "profit_factor": profit_factor,
         "expectancy": expectancy,
-        "total_pnl_usd": pnl.sum(),
+        "total_pnl": pnl.sum(),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "sharpe_ratio": sharpe,
@@ -119,7 +119,7 @@ def _empty_metrics() -> dict:
     return {
         "total_trades": 0, "win_count": 0, "loss_count": 0,
         "win_rate": 0.0, "avg_win_usd": 0.0, "avg_loss_usd": 0.0,
-        "profit_factor": 0.0, "expectancy": 0.0, "total_pnl_usd": 0.0,
+        "profit_factor": 0.0, "expectancy": 0.0, "total_pnl": 0.0,
         "gross_profit": 0.0, "gross_loss": 0.0,
         "sharpe_ratio": 0.0, "sortino_ratio": 0.0, "calmar_ratio": 0.0,
         "max_dd_usd": 0.0, "max_dd_pct": 0.0,

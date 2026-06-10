@@ -52,6 +52,9 @@ with st.sidebar:
     sel_strategies = st.multiselect("Estrategia", strategies_available, default=["Todos"])
     sel_regimes = st.multiselect("Fase ciclo", regimes_available, default=["Todos"])
     sel_quality = st.multiselect("Calidad setup", qualities_available, default=["Todos"])
+    
+    directions_available = ["Todos", "long", "short"]
+    sel_direction = st.multiselect("Dirección", directions_available, default=["Todos"])
     data_source = st.radio("Datos", ["Solo reales", "Solo backtest", "Todos"], index=0)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +90,10 @@ if "Todos" not in sel_regimes and sel_regimes and "regime" in df.columns:
 # Calidad
 if "Todos" not in sel_quality and sel_quality and "setup_quality" in df.columns:
     df = df[df["setup_quality"].isin(sel_quality)]
+
+# Dirección
+if "Todos" not in sel_direction and sel_direction and "direction" in df.columns:
+    df = df[df["direction"].isin(sel_direction)]
 
 # Fuente de datos
 if data_source == "Solo reales" and "is_backtest" in df_all.columns:

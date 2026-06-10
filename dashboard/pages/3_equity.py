@@ -37,7 +37,32 @@ period = st.radio("Período:", ["1S", "1M", "3M", "6M", "1A", "ALL"],
                   index=5, horizontal=True, key="equity_period")
 
 if not eq_df.empty:
+    # Curva total normal
     fig = equity_curve_chart(eq_df, period)
+    
+    # Añadir trazos para longs y shorts si existen en los trades
+    if not df.empty and "direction" in df.columns:
+        from dashboard.components.charts import _filter_period, COLORS
+        df_per = _filter_period(df.copy(), "entry_time", period)
+        if not df_per.empty:
+            df_per = df_per.sort_values("entry_time")
+            longs = df_per[df_per["direction"] == "long"].copy()
+            shorts = df_per[df_per["direction"] == "short"].copy()
+            
+            if not longs.empty:
+                longs["cum_pnl"] = longs["pnl"].cumsum()
+                fig.add_trace(go.Scatter(
+                    x=longs["entry_time"], y=longs["cum_pnl"] + eq_df["equity"].iloc[0],
+                    mode="lines", name="Longs", line=dict(color=COLORS["win"], width=1.5, dash="dot")
+                ), row=1, col=1)
+                
+            if not shorts.empty:
+                shorts["cum_pnl"] = shorts["pnl"].cumsum()
+                fig.add_trace(go.Scatter(
+                    x=shorts["entry_time"], y=shorts["cum_pnl"] + eq_df["equity"].iloc[0],
+                    mode="lines", name="Shorts", line=dict(color=COLORS["loss"], width=1.5, dash="dot")
+                ), row=1, col=1)
+                
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
 else:
     st.info("Sin datos de equity. Ejecuta trades para ver la curva.")
@@ -58,7 +83,7 @@ r4.metric("Sortino",      f"{m['sortino_ratio']:.2f}")
 r5.metric("Calmar",       f"{m['calmar_ratio']:.2f}")
 r6.metric("Max Wins",     m["max_consecutive_wins"])
 r7.metric("Max Losses",   m["max_consecutive_losses"])
-recovery = (m["total_pnl_usd"] / m["max_dd_usd"]) if m["max_dd_usd"] > 0 else 0
+recovery = (m["total_pnl"] / m["max_dd_usd"]) if m["max_dd_usd"] > 0 else 0
 r8.metric("Recovery F.",  f"{recovery:.2f}")
 
 st.divider()

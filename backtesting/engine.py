@@ -366,10 +366,10 @@ class BacktestResult:
             f"Trades:  {self.total_trades}",
             f"",
             f"── Métricas Objetivo (Fase 1) ──",
-            f"Win Rate:      {m.win_rate*100:.1f}%  (objetivo: ≥45%) {'\u2705' if m.win_rate >= 0.45 else '\u274c'}",
-            f"Profit Factor: {m.profit_factor:.2f}   (objetivo: ≥1.5) {'\u2705' if m.profit_factor >= 1.5 else '\u274c'}",
-            f"Sharpe Ratio:  {m.sharpe_ratio_annual:.2f}   (objetivo: ≥1.0) {'\u2705' if m.sharpe_ratio_annual >= 1.0 else '\u274c'}",
-            f"Max Drawdown:  {m.max_drawdown_pct*100:.1f}%  (objetivo: ≤15%) {'\u2705' if m.max_drawdown_pct <= 0.15 else '\u274c'}",
+            f"Win Rate:      {m.win_rate*100:.1f}%  (objetivo: >=45%) {'✅' if m.win_rate >= 0.45 else '❌'}",
+            f"Profit Factor: {m.profit_factor:.2f}   (objetivo: >=1.5) {'✅' if m.profit_factor >= 1.5 else '❌'}",
+            f"Sharpe Ratio:  {m.sharpe_ratio_annual:.2f}   (objetivo: >=1.0) {'✅' if m.sharpe_ratio_annual >= 1.0 else '❌'}",
+            f"Max Drawdown:  {m.max_drawdown_pct*100:.1f}%  (objetivo: <=15%) {'✅' if m.max_drawdown_pct <= 0.15 else '❌'}",
             f"",
             f"── Métricas Adicionales ──",
             f"Expectancy:    ${m.expectancy:.2f}/trade",
@@ -390,14 +390,15 @@ class BacktestResult:
                 f"PF Aleatorio P95: {bs.get('bootstrap_pf_p95', '?'):.3f}",
             ]
             if bs.get("warning"):
-                lines.append(f"\u26a0\ufe0f  {bs['warning']}")
+                lines.append(f"⚠️  {bs['warning']}")
 
+        pass_text = "✅ SÍ" if self.passes_phase1_criteria() else "❌ NO"
         lines += [
             f"",
             f"Régimen Volatilidad: {self.volatility_regime}",
             f"Kelly Multiplier:    {self.kelly_multiplier:.2f}x",
             f"",
-            f"PASA FASE 1: {'\u2705 S\u00cd' if self.passes_phase1_criteria() else '\u274c NO'}",
+            f"PASA FASE 1: {pass_text}",
             f"{'='*60}\n",
         ]
         return "\n".join(lines)
@@ -467,8 +468,8 @@ class BacktestEngine:
         )
 
         # 6. Loop principal por vela
-        start_date = df["timestamp"].iloc[0]
-        end_date = df["timestamp"].iloc[-1]
+        start_date = pd.to_datetime(df["timestamp"].iloc[0], unit="ms" if isinstance(df["timestamp"].iloc[0], (int, float)) else None)
+        end_date = pd.to_datetime(df["timestamp"].iloc[-1], unit="ms" if isinstance(df["timestamp"].iloc[-1], (int, float)) else None)
 
         iterator = tqdm(
             range(1, len(df)),
@@ -479,7 +480,8 @@ class BacktestEngine:
 
         for i in iterator:
             row = df.iloc[i]
-            ts = row["timestamp"]
+            ts = row.get("datetime", pd.to_datetime(row["timestamp"], unit="ms" if isinstance(row["timestamp"], (int, float)) else None))
+            if isinstance(ts, str): ts = pd.to_datetime(ts)
             high = row["high"]
             low = row["low"]
             close = row["close"]
@@ -944,7 +946,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       {{ "%.1f"|format(metrics.win_rate * 100) }}%
     </div>
     <div class="badge {% if metrics.win_rate >= 0.45 %}badge-pass{% else %}badge-fail{% endif %}">
-      Obj: ≥45%
+      Obj: >=45%
     </div>
   </div>
   <div class="card">
@@ -953,7 +955,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       {{ "%.2f"|format(metrics.profit_factor) }}
     </div>
     <div class="badge {% if metrics.profit_factor >= 1.5 %}badge-pass{% else %}badge-fail{% endif %}">
-      Obj: ≥1.5
+      Obj: >=1.5
     </div>
   </div>
   <div class="card">
@@ -962,7 +964,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       {{ "%.2f"|format(metrics.sharpe_ratio_annual) }}
     </div>
     <div class="badge {% if metrics.sharpe_ratio_annual >= 1.0 %}badge-pass{% else %}badge-fail{% endif %}">
-      Obj: ≥1.0
+      Obj: >=1.0
     </div>
   </div>
   <div class="card">
@@ -971,7 +973,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       {{ "%.1f"|format(metrics.max_drawdown_pct * 100) }}%
     </div>
     <div class="badge {% if metrics.max_drawdown_pct <= 0.15 %}badge-pass{% else %}badge-fail{% endif %}">
-      Obj: ≤15%
+      Obj: <=15%
     </div>
   </div>
   <div class="card">
@@ -1370,3 +1372,48 @@ class HyperparameterOptimizer:
         
         res = run_single_backtest(best_params, dfs_test_full, self.symbol)
         return res
+
+# ── CLI para invocar Backtest desde consola ──────────────────────────────────
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Ejecutar backtest del motor.")
+    parser.add_argument("--dry-run", action="store_true", help="Ejecutar sin guardar reporte")
+    parser.add_argument("--report-by-phase", action="store_true", help="Mostrar desglose por fase del ciclo")
+    args = parser.parse_args()
+    
+    logger.info("Iniciando validación de backtest (Phase 3 Integration)...")
+    
+    # Cargar datos para 'BTC/USDC' como ejemplo de validación
+    symbol = "BTC/USDC"
+    # Requerirá que sqlite tenga los datos. Usamos load_daily_ohlcv u otra función
+    import sqlite3
+    conn = sqlite3.connect("data/db/trading.db")
+    query = f"SELECT * FROM ohlcv WHERE symbol='{symbol}' AND timeframe='1h' ORDER BY timestamp"
+    df = pd.read_sql(query, conn)
+    conn.close()
+    
+    if df.empty:
+        logger.warning("No hay datos en DB para el backtest. Finalizando.")
+        exit(0)
+        
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df.set_index("datetime", inplace=True)
+    
+    # Inicializar el engine
+    engine = BacktestEngine(initial_capital=1000.0)
+    strategy = TrendFollowingStrategy(symbol, timeframe="1h")
+    
+    # Correr
+    result = engine.run(symbol=symbol, df=df, strategy=strategy, timeframe="1h")
+    
+    # Imprimir resumen de métricas
+    print("\n" + "="*60)
+    print(" BACKTEST METRICS SUMMARY")
+    print("="*60)
+    print(result.metrics.summary())
+    print("="*60 + "\n")
+    
+    if args.report_by_phase:
+        print("=> Desglose por fases no implementado aún en BacktestMetrics.\n")
+
