@@ -98,7 +98,7 @@ CORRELATION_GROUPS: Dict[str, str] = {
 # Pares de alta prioridad: únicos activos en BEAR_DEEP (reduce CPU 66%)
 SYMBOLS_BEAR_DEEP: List[str] = ["BTC/USDC", "ETH/USDC"]
 MAX_CORR_POS          = 1
-MR_HOURS_BEAR         = range(0, 8)     # MR solo sesión asiática en BEAR
+MR_HOURS_BEAR         = range(0, 24)    # MR a cualquier hora (corregido)
 MR_HOURS_ACCUM        = range(0, 16)    # MR más amplio en acumulación
 MR_HOURS_BULL         = range(0, 24)    # En bull market MR a cualquier hora
 COOLDOWN_SL_MIN       = 90
@@ -736,13 +736,13 @@ class AdaptiveSignalSelector:
         # En fase BEAR: el RSI debe ser extremo (sobreventa real) o Z-Score extremo
         zscore = float(last.get("zscore_vwap", 0.0))
         if phase in ("BEAR_DEEP","BEAR_RECOVERY"):
-            if rsi > 32 and zscore > -2.0:
-                return None   # No entrar MR en bear sin sobreventa extrema o z-score profundo
+            if rsi > 35 and zscore > -1.5:
+                return None   # No entrar MR en bear sin sobreventa o z-score
             if zscore < -2.0:
                 score += 20; reasons.append(f"zscore={zscore:.1f}_extreme")
-            else:
-                score += 10; reasons.append("BEAR_extreme_oversold")
-            if cycle and cycle.phase_strength > 0.85:
+            elif zscore < -1.5:
+                score += 10; reasons.append("BEAR_oversold")
+            if cycle and cycle.phase_strength > 0.90:
                 return None   # Bear demasiado fuerte
 
         # Boost por Hurst Exponent (Fase 3)
@@ -754,8 +754,14 @@ class AdaptiveSignalSelector:
         if cycle and phase == "ACCUMULATION":
             score += 8; reasons.append("CYCLE:ACCUM_bonus")
 
-        # Umbral adaptativo
-        min_score = 60 if phase == "ACCUMULATION" else 65 if phase in ("BULL_EARLY","BULL_MATURE") else 72
+        # Bonus por Soportes/Resistencias institucionales
+        if ctx.sr_at_zone:
+            score += 15; reasons.append("SR_Support_Zone")
+        if ctx.fib_near:
+            score += 10; reasons.append("FIB_Support")
+
+        # Umbral adaptativo (reducido para priorizar zonas S/R en Bear)
+        min_score = 60 if phase == "ACCUMULATION" else 65
         if score < min_score:
             return None
 
@@ -1301,9 +1307,20 @@ class LiveEngineV6:
             self._pending.pop(symbol, None); return
 
         # ── Confirmación micro 15M ────────────────────────────────────────────
-        micro = (int(float(last15.get("rsi", 50)) > 50) +
-                 int(bool(last15.get("macd_bull", False))) +
-                 int(bool(last15.get("above_vwap", False))))
+        if signal.strategy.startswith("MeanReversion") and signal.direction == "long":
+            # Para MR Long en sobreventa, buscamos rechazo, no tendencia
+            micro = (int(float(last15.get("rsi", 50)) > 25) +
+                     int(float(last15.get("stoch_rsi", 0.5)) > 0.05) +
+                     int(bool(last15.get("macd_growing", False))))
+        elif signal.direction == "long":
+            micro = (int(float(last15.get("rsi", 50)) > 50) +
+                     int(bool(last15.get("macd_bull", False))) +
+                     int(bool(last15.get("above_vwap", False))))
+        else: # SHORT
+            micro = (int(float(last15.get("rsi", 50)) < 50) +
+                     int(not bool(last15.get("macd_bull", False))) +
+                     int(not bool(last15.get("above_vwap", True))))
+                     
         if micro == 0: return
 
         # ── Filtro de volumen: vela de entrada debe tener volumen activo ───────
