@@ -324,36 +324,50 @@ class OHLCVStorage:
         batch_size: int,
     ) -> int:
         """
-        Upsert para SQLite usando session.merge() (INSERT OR REPLACE).
+        Upsert nativo para SQLite usando INSERT ... ON CONFLICT DO UPDATE.
+        Requiere SQLAlchemy >= 1.4 y SQLite >= 3.24.
         """
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
         total = 0
+        table = OHLCVRecord.__table__
 
         for i in range(0, len(df), batch_size):
             batch = df.iloc[i : i + batch_size]
-            records = []
-
+            rows = []
             for _, row in batch.iterrows():
                 ts = row["timestamp"]
                 if not hasattr(ts, "tzinfo") or ts.tzinfo is None:
                     ts = pd.Timestamp(ts, tz="UTC")
 
-                records.append(
-                    OHLCVRecord(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        timestamp=ts.to_pydatetime(),
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=float(row["volume"]),
-                    )
-                )
+                rows.append({
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": ts.to_pydatetime(),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                })
 
-            with self.get_session() as session:
-                for record in records:
-                    session.merge(record)
-            total += len(records)
+            stmt = sqlite_insert(table).values(rows)
+            # ON CONFLICT DO UPDATE nativo de SQLite
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "timeframe", "timestamp"],
+                set_={
+                    "open":   stmt.excluded.open,
+                    "high":   stmt.excluded.high,
+                    "low":    stmt.excluded.low,
+                    "close":  stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                },
+            )
+
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+
+            total += len(rows)
 
         return total
 
