@@ -453,6 +453,11 @@ def _v5_confirmed(ctx: V5Context, phase: str, strategy: str) -> Tuple[bool, str]
     if ctx.candle_bull >= 20 or ctx.absorption:
         return True, ""
 
+    # Excepción explícita para MeanReversion:
+    # Si choca contra un soporte fuerte, no pedimos tendencia alcista V5
+    if strategy == "MeanReversion" and (ctx.sr_at_zone or ctx.fib_near):
+        return True, ""
+
     # Contar señales moderadas
     mods = [
         ctx.candle_bull >= 10,
@@ -1274,7 +1279,9 @@ class LiveEngineV6:
         # Cooldown tras SL
         ss = self._sym_state[symbol]
         now_ts = time.time()
-        if now_ts - ss.last_sl_time < COOLDOWN_SL_MIN * 60: return
+        if now_ts - ss.last_sl_time < COOLDOWN_SL_MIN * 60: 
+            log.debug("entry_rejected_cooldown", symbol=symbol, min_remaining=int((COOLDOWN_SL_MIN*60 - (now_ts - ss.last_sl_time))/60))
+            return
 
         # ── Circuit breaker: SL consecutivos por símbolo ──────────────────────
         if ss.sl_consecutive >= CB_SL_CONSECUTIVE:
@@ -1321,7 +1328,9 @@ class LiveEngineV6:
                      int(not bool(last15.get("macd_bull", False))) +
                      int(not bool(last15.get("above_vwap", True))))
                      
-        if micro == 0: return
+        if micro == 0: 
+            log.debug("entry_rejected_micro", symbol=symbol, rsi=float(last15.get("rsi",50)), stoch=float(last15.get("stoch_rsi",0.5)), macd=bool(last15.get("macd_growing",False)))
+            return
 
         # ── Filtro de volumen: vela de entrada debe tener volumen activo ───────
         # Volumen de la última vela 15M debe ser >= 80% del promedio de 20 velas
