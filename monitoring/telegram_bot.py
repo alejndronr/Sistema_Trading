@@ -176,6 +176,8 @@ class TelegramBot:
         Args:
             stats: dict con capital, pnl_today, trades_today, wins_today,
                    losses_today, drawdown_pct, ml_ready, ml_trained_at.
+                   Opcional: funnel dict con total_evaluations, passed_regime,
+                   generated_signal, executed_trade, consecutive_zero_days.
         """
         capital   = stats.get("capital", 0)
         pnl       = stats.get("pnl_today", 0)
@@ -183,19 +185,53 @@ class TelegramBot:
         wins      = stats.get("wins_today", 0)
         losses    = stats.get("losses_today", 0)
         dd        = stats.get("drawdown_pct", 0)
-        ml_ready  = "✅" if stats.get("ml_ready") else "⚠️ Sin entrenar"
+        ml_ready  = "Entrenado" if stats.get("ml_ready") else "Sin entrenar"
         ml_date   = stats.get("ml_trained_at", "—")
 
+        # ── Embudo de senales ──
+        funnel = stats.get("funnel", {})
+        zero_days = funnel.get("consecutive_zero_days", 0)
+        total_eval = funnel.get("total_evaluations", 0)
+        passed_regime = funnel.get("passed_regime", 0)
+        generated = funnel.get("generated_signal", 0)
+        executed  = funnel.get("executed_trade", 0)
+
+        # Indicador de alerta si llevan N dias sin trades
+        zero_warn = ""
+        if zero_days >= 5:
+            zero_warn = f"  ALERTA: {zero_days} dias consecutivos sin trades"
+        elif zero_days >= 2:
+            zero_warn = f"  ({zero_days} dias sin trades)"
+
         trend = "📈" if pnl >= 0 else "📉"
+
+        # Porcentajes del embudo
+        pct_regime   = f"{passed_regime/total_eval*100:.0f}%" if total_eval > 0 else "-"
+        pct_signal   = f"{generated/total_eval*100:.0f}%" if total_eval > 0 else "-"
+        pct_executed = f"{executed/total_eval*100:.0f}%" if total_eval > 0 else "-"
+
         msg = (
-            f"*📊 Resumen diario*\n"
+            f"*Resumen diario*\n"
             f"{trend} PnL: `{pnl:+.2f}` USD\n"
             f"Capital: `${capital:.2f}`\n"
-            f"Trades: `{trades}` (W:{wins} / L:{losses})\n"
+            f"Trades: `{trades}` (W:{wins} / L:{losses}){zero_warn}\n"
             f"Drawdown: `{dd:.2%}`\n"
-            f"Modelo ML: {ml_ready} | Entrenado: `{ml_date}`"
+            f"Modelo ML: {ml_ready} | Entrenado: `{ml_date}`\n"
+            f"\n*Embudo de senales (hoy):*\n"
+            f"  Evaluaciones: `{total_eval}`\n"
+            f"  Pasaron regimen: `{passed_regime}` ({pct_regime})\n"
+            f"  Generaron senal: `{generated}` ({pct_signal})\n"
+            f"  Trades ejecutados: `{executed}` ({pct_executed})"
         )
         await self._send(msg)
+
+        # Alerta critica separada si 5+ dias sin trades
+        if zero_days >= 5:
+            alert = (
+                f"ALERTA CRITICA: {zero_days} dias sin trades.\n"
+                f"Diagnostico: `python diagnose_signals.py`"
+            )
+            await self._send(alert, pin=True)
 
     async def send_alert(self, message: str, level: str = "info") -> None:
         """

@@ -630,6 +630,7 @@ class AdaptiveSignalSelector:
         if t_stat < -2.0:
             score += 15; reasons.append(f"t_stat={t_stat:.1f}")
         elif t_stat > -1.0:
+            log.debug("tf_short_tstat_invalid", symbol=symbol, t_stat=f"{t_stat:.1f}")
             return None  # Requiere tendencia bajista estadísticamente válida
 
         # Bonus según fase del ciclo
@@ -638,18 +639,26 @@ class AdaptiveSignalSelector:
 
         min_score = 65 if phase == "BEAR_DEEP" else 75
         if score < min_score:
+            log.debug("tf_short_score_below_threshold", symbol=symbol, score=f"{score:.0f}", min_score=min_score)
             return None
 
         # Confirmación V5
         ok, reason = _v5_confirmed(ctx, phase, "TrendFollowing")
         # Invertir requerimiento para V5 (simplificado: si hay confirmación bear)
         if not (ctx.candle_bear >= 10 or ctx.structure_bias == "bear" or ctx.sr_at_zone):
+            log.debug("tf_short_v5_no_confirmation", symbol=symbol)
+            return None
+        
+        if not ok:
+            log.debug("tf_short_v5_rejected", symbol=symbol, reason=reason)
             return None
 
         atr  = float(last.get("atr", c*0.015))
         high5 = float(df["high"].iloc[-5:].max())
         sl   = _sl_from_sr(min(c+2.0*atr, high5+0.3*atr, c*1.022), "short", ctx)
-        if c >= sl: return None
+        if c >= sl: 
+            log.debug("tf_short_sl_overlap", symbol=symbol, entry=c, sl=sl)
+            return None
         tp1, tp2, tp3 = _targets(c, sl, "short", ctx)
 
         return SignalResult(
@@ -682,6 +691,7 @@ class AdaptiveSignalSelector:
         if t_stat > 2.0:
             score += 15; reasons.append(f"t_stat={t_stat:.1f}")
         elif t_stat < 1.0:
+            log.debug("tf_tstat_below_threshold", symbol=symbol, t_stat=f"{t_stat:.2f}")
             return None  # Requiere tendencia estadísticamente válida
 
         # Bonus según fase del ciclo
@@ -693,17 +703,22 @@ class AdaptiveSignalSelector:
         # Umbral adaptativo: más estricto en fases tardías
         min_score = 65 if phase == "BULL_MATURE" else 72 if phase == "BULL_EARLY" else 78
         if score < min_score:
+            log.debug("tf_score_below_threshold", symbol=symbol,
+                      score=f"{score:.0f}", min_score=min_score, phase=phase)
             return None
 
         # Confirmación V5
         ok, reason = _v5_confirmed(ctx, phase, "TrendFollowing")
         if not ok:
+            log.debug("tf_v5_rejected", symbol=symbol, reason=reason)
             return None
 
         atr  = float(last.get("atr", c*0.015))
         low5 = float(df["low"].iloc[-5:].min())
         sl   = _sl_from_sr(max(c-2.0*atr, low5-0.3*atr, c*0.978), "long", ctx)
-        if c <= sl: return None
+        if c <= sl: 
+            log.debug("tf_sl_overlap", symbol=symbol, entry=c, sl=sl)
+            return None
         tp1, tp2, tp3 = _targets(c, sl, "long", ctx)
 
         return SignalResult(
@@ -738,17 +753,23 @@ class AdaptiveSignalSelector:
         if bool(last.get("macd_cross_up")): score += 15; reasons.append("MACD_cross")
         elif bool(last.get("macd_growing")): score += 8
 
-        # En fase BEAR: el RSI debe ser extremo (sobreventa real) o Z-Score extremo
+        # En fase BEAR: penalizar si no hay sobreventa real en lugar de vetar
         zscore = float(last.get("zscore_vwap", 0.0))
         if phase in ("BEAR_DEEP","BEAR_RECOVERY"):
             if rsi > 35 and zscore > -1.5:
-                return None   # No entrar MR en bear sin sobreventa o z-score
+                # Penalizacion en lugar de veto: condiciones moderadas en bear
+                score -= 20
+                log.debug("mr_bear_no_oversold_penalty", symbol=symbol,
+                          rsi=f"{rsi:.0f}", zscore=f"{zscore:.2f}", score_after=f"{score:.0f}")
             if zscore < -2.0:
                 score += 20; reasons.append(f"zscore={zscore:.1f}_extreme")
             elif zscore < -1.5:
                 score += 10; reasons.append("BEAR_oversold")
             if cycle and cycle.phase_strength > 0.90:
-                return None   # Bear demasiado fuerte
+                # Penalizacion en lugar de veto: bear muy fuerte reduce score
+                score -= 25
+                log.debug("mr_bear_very_strong_penalty", symbol=symbol,
+                          phase_strength=f"{cycle.phase_strength:.2f}", score_after=f"{score:.0f}")
 
         # Boost por Hurst Exponent (Fase 3)
         hurst = float(last.get("hurst_exp", 0.5))
@@ -765,16 +786,29 @@ class AdaptiveSignalSelector:
         if ctx.fib_near:
             score += 10; reasons.append("FIB_Support")
 
-        # Umbral adaptativo (reducido para priorizar zonas S/R en Bear)
-        min_score = 60 if phase == "ACCUMULATION" else 65
+        # Umbral adaptativo por fase del ciclo (NOT es el AND-serial de antes)
+        min_score = {
+            "BEAR_DEEP":     55,
+            "BEAR_RECOVERY": 58,
+            "ACCUMULATION":  55,
+            "BULL_EARLY":    50,
+            "BULL_MATURE":   45,
+            "BULL_LATE":     60,
+            "DISTRIBUTION":  65,
+        }.get(phase, 60)
         if score < min_score:
+            log.debug("mr_score_below_threshold", symbol=symbol,
+                      score=f"{score:.0f}", min_score=min_score, phase=phase)
             return None
 
-        # Confirmación V5 — para MR exigimos soporte o Fibonacci
+        # Confirmacion V5 — para MR exigimos soporte o Fibonacci
         if not (ctx.candle_bull >= 12 or ctx.sr_at_zone or ctx.fib_near):
+            log.debug("mr_no_v5_confirmation", symbol=symbol,
+                      candle_bull=ctx.candle_bull, sr_at_zone=ctx.sr_at_zone, fib_near=ctx.fib_near)
             return None
         ok, reason = _v5_confirmed(ctx, phase, "MeanReversion")
         if not ok:
+            log.debug("mr_v5_rejected", symbol=symbol, reason=reason)
             return None
 
         atr_mult = 2.5 if phase in ("BEAR_DEEP","BEAR_RECOVERY") else 2.0
@@ -810,9 +844,13 @@ class AdaptiveSignalSelector:
 
         # Breakout REQUIERE volumen institucional
         if not (ctx.absorption or ctx.obv_accel):
+            log.debug("breakout_no_institutional_vol", symbol=symbol,
+                      absorption=ctx.absorption, obv_accel=ctx.obv_accel)
             return None
 
-        if score < 65: return None
+        if score < 65:
+            log.debug("breakout_score_below_threshold", symbol=symbol, score=f"{score:.0f}")
+            return None
 
         atr  = float(last.get("atr", c*0.015))
         prev_upper = float(df["bb_upper"].iloc[-2]) if len(df) > 1 else bb_upper
@@ -854,9 +892,16 @@ class AdaptiveSignalSelector:
         elif mh > 0: score += 10
 
         # Scalp solo con OBV acelerando
-        if not ctx.obv_accel: return None
-        if not (ctx.cvd_pos or ctx.candle_bull >= 10): return None
-        if score < 65: return None
+        if not ctx.obv_accel:
+            log.debug("scalp_no_obv_accel", symbol=symbol)
+            return None
+        if not (ctx.cvd_pos or ctx.candle_bull >= 10):
+            log.debug("scalp_no_cvd_or_candle", symbol=symbol,
+                      cvd_pos=ctx.cvd_pos, candle_bull=ctx.candle_bull)
+            return None
+        if score < 65:
+            log.debug("scalp_score_below_threshold", symbol=symbol, score=f"{score:.0f}")
+            return None
 
         atr  = float(last.get("atr", c*0.015))
         sl   = _sl_from_sr(max(c-1.2*atr, c*0.985), "long", ctx)
@@ -979,6 +1024,16 @@ class LiveEngineV6:
             "paused": False, "kill": False, "paper_mode": paper_mode,
             "capital": INITIAL_CAPITAL, "open_positions": [],
             "cycles": {}, "regimes": {}, "last_signals": {},
+            # Embudo de senales (Tarea 5 — telemetria)
+            "funnel": {
+                "total_evaluations": 0,   # llamadas a _analyze_symbol hoy
+                "passed_regime": 0,        # superaron detect_regime.is_tradeable
+                "generated_signal": 0,     # selector.analyze devolvio senal
+                "executed_trade": 0,       # trade enviado al exchange/paper
+                "consecutive_zero_days": 0,
+                "last_trade_date": None,
+                "reset_date": None,        # fecha del ultimo reset diario
+            },
         }
         self._sym_state:  Dict[str, SymbolState]     = {s: SymbolState() for s in SYMBOLS}
         self._df_cache:   Dict[str, pd.DataFrame]    = {}
@@ -1203,9 +1258,29 @@ class LiveEngineV6:
             except Exception as exc:
                 log.warning("enrich_error_v6", symbol=symbol, error=str(exc)); return
 
+        # ── Embudo de senales: reset diario y conteo de evaluaciones ──────────
+        funnel = self.state["funnel"]
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        if funnel.get("reset_date") != today_str:
+            # Nuevo dia: resetear contadores pero mantener historial de dias consecutivos
+            prev_executed = funnel.get("executed_trade", 0)
+            if prev_executed == 0 and funnel.get("reset_date") is not None:
+                funnel["consecutive_zero_days"] = funnel.get("consecutive_zero_days", 0) + 1
+            else:
+                funnel["consecutive_zero_days"] = 0
+                funnel["last_trade_date"] = today_str
+            funnel["total_evaluations"] = 0
+            funnel["passed_regime"] = 0
+            funnel["generated_signal"] = 0
+            funnel["executed_trade"] = 0
+            funnel["reset_date"] = today_str
+        funnel["total_evaluations"] += 1
+
         regime = detect_regime(df, symbol)
         if not regime.is_tradeable:
             return
+
+        funnel["passed_regime"] += 1
 
         self._df_cache[symbol]            = df
         self.state["regimes"][symbol]     = regime.regime
@@ -1215,6 +1290,8 @@ class LiveEngineV6:
         signal = self._selector.analyze(df, symbol, regime, cycle, hour)
         if signal is None:
             self._pending.pop(symbol, None); return
+
+        funnel["generated_signal"] += 1
 
         # ML proba
         if self._ml and self._ml.is_ready():
@@ -1385,10 +1462,13 @@ class LiveEngineV6:
             units=units, ml_proba=signal.ml_proba,
             direction=signal.direction, regime=signal.regime.regime,
             risk_amount=risk, notional_usd=notional,
-            atr=signal.atr,   # ATR real para trailing stop dinámico
+            atr=signal.atr,
             hurst_at_entry=h_exp, zscore_at_entry=z_vwap,
             t_stat_at_entry=tstat, confluence_score=confluence,
         )
+        # Contabilizar en el embudo de senales
+        self.state["funnel"]["executed_trade"] += 1
+
         if self._bot:
             await self._bot.send_trade_open(trade)
         await self._log_trade(trade, signal, notional, capital)
@@ -1465,7 +1545,11 @@ class LiveEngineV6:
             if now.date() != last_daily and now.hour == 0:
                 last_daily = now.date()
                 if self._bot and daily:
-                    await self._bot.send_daily_pnl({**daily,"capital":capital})
+                    await self._bot.send_daily_pnl({
+                        **daily,
+                        "capital": capital,
+                        "funnel": dict(self.state.get("funnel", {})),
+                    })
 
     # ── Helpers ────────────────────────────────────────────────────────────────
     async def _log_trade(self, trade, signal, notional, capital):
