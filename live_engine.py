@@ -89,6 +89,21 @@ COMMISSION_RATE    = 0.001
 SLIPPAGE           = 0.001
 MARGIN_ENABLED     = os.environ.get("MARGIN_ENABLED", "false").lower() == "true"
 
+# ── Dos capas de seguridad (Krypt Trader pattern) ──────────────────────────────
+# PAPER_MODE=true es el alias de compatibilidad que establece el modo paper completo.
+# Separado en dos flags independientes para mayor granularidad:
+#
+#   SIMULATE_DATA=false    → usa datos reales de Binance (normal en paper trading)
+#   SEND_REAL_ORDERS=false → envia ordenes solo al paper portfolio (no al exchange)
+#
+# PAPER_MODE=true sobreescribe ambas a su valor seguro.
+_paper_mode_env = os.environ.get("PAPER_MODE", "true").lower() not in ("false", "0", "no")
+SIMULATE_DATA   = os.environ.get("SIMULATE_DATA",    "true" if _paper_mode_env else "false").lower() == "true"
+SEND_REAL_ORDERS = os.environ.get("SEND_REAL_ORDERS", "false" if _paper_mode_env else "true").lower() == "true"
+# Seguridad adicional: si PAPER_MODE=true, forzar SEND_REAL_ORDERS=false pase lo que pase
+if _paper_mode_env:
+    SEND_REAL_ORDERS = False
+
 # ── Filtros ────────────────────────────────────────────────────────────────────
 CORRELATION_GROUPS: Dict[str, str] = {
     "BTC/USDC": "btc",
@@ -1047,10 +1062,19 @@ class LiveEngineV6:
         self._ml:        Optional[MetaLabeler]       = None
 
     async def start(self) -> None:
-        self._running = True   # ← CRÍTICO: los loops usan while self._running
+        self._running = True
         log.info("engine_v6_starting", version=ENGINE_VERSION,
                  paper=self.paper_mode, cycle_detector=CYCLE_OK,
-                 v5_indicators=V5_OK, symbols=SYMBOLS)
+                 v5_indicators=V5_OK, symbols=SYMBOLS,
+                 simulate_data=SIMULATE_DATA,
+                 send_real_orders=SEND_REAL_ORDERS)
+        if SEND_REAL_ORDERS:
+            log.warning("engine_live_order_mode_active",
+                        msg="SEND_REAL_ORDERS=True: ordenes REALES a Binance activas",
+                        disclaimer="Leer DISCLAIMER.md antes de operar en live")
+        else:
+            log.info("engine_paper_confirmed",
+                     msg="SEND_REAL_ORDERS=False: paper portfolio, sin ordenes reales")
 
         self._exchange = ccxt.binance({
             "apiKey": os.environ.get("BINANCE_API_KEY",""),
@@ -1677,7 +1701,9 @@ def _secs_to_next(tf_s: int) -> float:
 
 
 async def _main():
-    paper = os.environ.get("PAPER_MODE","true").lower() not in ("false","0","no")
+    # paper_mode es el inverso de SEND_REAL_ORDERS — mantiene compatibilidad con PaperPortfolio
+    # SEND_REAL_ORDERS ya fue resuelto a nivel de modulo (con seguridad de PAPER_MODE override)
+    paper = not SEND_REAL_ORDERS
     engine = LiveEngineV6(paper_mode=paper)
     try:
         await engine.start()

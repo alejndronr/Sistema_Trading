@@ -4,6 +4,10 @@ Este repositorio contiene la versión consolidada, optimizada y auditada del sis
 
 Filosofía del sistema: **"Preservar capital primero. Crecer segundo."**
 
+> ⚠️ **IMPORTANTE:** Antes de usar este sistema, leer [DISCLAIMER.md](DISCLAIMER.md).
+> El sistema está en validación activa. No existe evidencia out-of-sample suficiente de edge positivo.
+> No aumentar capital ni activar MARGIN_ENABLED sin completar la validación documentada en el DISCLAIMER.
+
 ---
 
 ## 🚀 Inicio Rápido e Instalación
